@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dedeki - D&D Virtual Tabletop</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚔️</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@700&family=Cinzel:wght@500;600;700&family=EB+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <script>
+    if (location.protocol === 'file:') {
+      document.body.innerHTML = '<div style="max-width:520px;margin:80px auto;padding:24px;font-family:Georgia,serif;line-height:1.6;color:#2c1810;background:#e8dcc8;border:2px solid #6b4a2a;border-radius:6px;">' +
+        '<h1 style="margin:0 0 12px;font-size:1.4rem;">Dedeki — uruchom przez serwer</h1>' +
+        '<p>Nie otwieraj pliku <code>index.html</code> z eksploratora. Najpierw w terminalu w folderze projektu:</p>' +
+        '<pre style="background:#d9cbb0;padding:12px;border-radius:4px;overflow:auto;">npm run db:up\nnpm start</pre>' +
+        '<p>Potem wejdź w przeglądarce na:</p>' +
+        '<p><a href="http://localhost:3000" style="color:#6e2e21;font-weight:bold;">http://localhost:3000</a></p>' +
+        '</div>';
+      throw new Error('Dedeki must be served over HTTP');
+    }
+  </script>
+  <div id="app">
+    <!-- Auth Screen -->
+    <div id="auth-screen" class="screen active">
+      <div class="auth-container">
+        <div class="auth-header">
+          <div class="logo">
+            <span class="logo-icon">⚔️</span>
+            <h1>Dedeki</h1>
+            <p class="subtitle">Kronika Przygód · D&amp;D 5e</p>
+          </div>
+        </div>
+        <div class="auth-tabs">
+          <button class="auth-tab active" data-tab="login">Logowanie</button>
+          <button class="auth-tab" data-tab="register">Rejestracja</button>
+        </div>
+        <form id="login-form" class="auth-form active">
+          <div class="form-group">
+            <label for="login-username">Nazwa użytkownika</label>
+            <input type="text" id="login-username" required autocomplete="username">
+          </div>
+          <div class="form-group">
+            <label for="login-password">Hasło</label>
+            <input type="password" id="login-password" required autocomplete="current-password">
+          </div>
+          <button type="submit" class="btn btn-primary btn-full">Zaloguj się</button>
+          <div id="login-error" class="error-msg"></div>
+        </form>
+        <form id="register-form" class="auth-form">
+          <div class="form-group">
+            <label for="reg-username">Nazwa użytkownika</label>
+            <input type="text" id="reg-username" required minlength="3" maxlength="30" pattern="[a-zA-Z0-9_]+" autocomplete="username">
+          </div>
+          <div class="form-group">
+            <label for="reg-email">Email</label>
+            <input type="email" id="reg-email" required autocomplete="email">
+          </div>
+          <div class="form-group">
+            <label for="reg-display-name">Nazwa wyświetlana</label>
+            <input type="text" id="reg-display-name" maxlength="50" autocomplete="name">
+          </div>
+          <div class="form-group">
+            <label for="reg-password">Hasło (min. 10 znaków)</label>
+            <input type="password" id="reg-password" required minlength="10" autocomplete="new-password">
+          </div>
+          <button type="submit" class="btn btn-primary btn-full">Zarejestruj się</button>
+          <div id="register-error" class="error-msg"></div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Dashboard Screen -->
+    <div id="dashboard-screen" class="screen">
+      <header class="main-header">
+        <div class="header-left">
+          <span class="logo-icon-sm">⚔️</span>
+          <span class="header-title">Dedeki</span>
+        </div>
+        <div class="header-right">
+          <span id="user-display-name" class="user-name"></span>
+          <button id="btn-my-characters" class="btn btn-sm btn-secondary">📋 Moje Postacie</button>
+          <button id="btn-import-char-global" class="btn btn-sm btn-secondary">📥 Importuj</button>
+          <button id="btn-logout" class="btn btn-sm btn-danger">Wyloguj</button>
+        </div>
+      </header>
+      <main class="dashboard-content">
+        <div class="dashboard-section">
+          <h2>🏰 Moje Kampanie</h2>
+          <div class="dashboard-actions">
+            <button id="btn-create-campaign" class="btn btn-primary">➕ Utwórz Kampanię</button>
+            <button id="btn-join-campaign" class="btn btn-secondary">🔗 Dołącz do Kampanii</button>
+          </div>
+          <div id="campaign-list" class="campaign-list"></div>
+        </div>
+      </main>
+    </div>
+
+    <!-- Campaign Session Screen -->
+    <div id="session-screen" class="screen">
+      <header class="session-header">
+        <div class="header-left">
+          <button id="btn-back-dashboard" class="btn btn-sm btn-secondary">← Powrót</button>
+          <button id="btn-delete-campaign" class="btn btn-sm btn-danger dm-only" type="button" title="Usuń kampanię">🗑️ Usuń</button>
+          <span id="campaign-name-header" class="campaign-title"></span>
+          <span id="campaign-role-badge" class="role-badge"></span>
+        </div>
+        <div class="header-center">
+          <div class="session-tabs">
+            <button class="session-tab active" data-panel="chat-panel">💬 Chat</button>
+            <button class="session-tab" data-panel="characters-panel">📋 Postacie</button>
+            <button class="session-tab" data-panel="map-panel">🗺️ Mapa</button>
+            <button class="session-tab" data-panel="initiative-panel">⚔️ Inicjatywa</button>
+            <button class="session-tab" data-panel="notes-panel">📝 Notatki</button>
+            <button class="session-tab" data-panel="dice-panel">🎲 Kości</button>
+            <button class="session-tab dm-only-tab" data-panel="dm-panel">👑 MG Panel</button>
+          </div>
+        </div>
+        <div class="header-right">
+          <div id="online-users-indicator" class="online-indicator">
+            <span class="online-dot"></span>
+            <span id="online-count">0</span> online
+          </div>
+        </div>
+      </header>
+      <div id="connection-banner" class="connection-banner hidden" role="status"></div>
+
+      <div class="session-content">
+        <!-- Chat Panel -->
+        <div id="chat-panel" class="session-panel active">
+          <div class="panel-layout chat-layout">
+            <div class="chat-party-column chat-party-left">
+              <div class="sidebar-section">
+                <h4>🧑‍🤝‍🧑 Pozostali</h4>
+                <div id="chat-party-others" class="chat-party-list"></div>
+              </div>
+            </div>
+            <div class="chat-main">
+              <div id="chat-messages" class="chat-messages"></div>
+              <button type="button" id="btn-load-older-chat" class="btn btn-sm btn-secondary hidden" style="margin-top:8px;">Wczytaj starsze wiadomości</button>
+              <div class="chat-input-area">
+                <div class="chat-controls">
+                  <select id="chat-type">
+                    <option value="chat">💬 Chat</option>
+                    <option value="ic">🎭 In Character</option>
+                    <option value="whisper">🤫 Szept</option>
+                    <option value="action">⚡ Akcja</option>
+                  </select>
+                  <input type="text" id="whisper-target" placeholder="Do kogo..." class="hidden">
+                </div>
+                <div class="chat-send">
+                  <input type="text" id="chat-input" placeholder="Napisz wiadomość..." autocomplete="off">
+                  <button id="btn-send-chat" class="btn btn-primary">Wyślij</button>
+                </div>
+              </div>
+            </div>
+            <div class="chat-sidebar">
+              <div class="sidebar-section">
+                <h4 id="chat-party-me-title">🎭 Twoja postać</h4>
+                <div id="chat-party-me" class="chat-party-list"></div>
+              </div>
+              <div class="sidebar-section">
+                <h4>🎲 Szybkie Rzuty</h4>
+                <div class="quick-dice">
+                  <button class="dice-btn" data-dice="d4">d4</button>
+                  <button class="dice-btn" data-dice="d6">d6</button>
+                  <button class="dice-btn" data-dice="d8">d8</button>
+                  <button class="dice-btn" data-dice="d10">d10</button>
+                  <button class="dice-btn" data-dice="d12">d12</button>
+                  <button class="dice-btn" data-dice="d20">d20</button>
+                  <button class="dice-btn d100" data-dice="d100">d100</button>
+                </div>
+              </div>
+              <div class="sidebar-section">
+                <h4>👥 Online</h4>
+                <div id="online-users-list" class="online-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Characters Panel -->
+        <div id="characters-panel" class="session-panel">
+          <div class="panel-header">
+            <h2>📋 Postacie w Kampanii</h2>
+            <div class="panel-header-actions">
+              <p id="active-character-label" class="active-character-label hidden">Brak aktywnej postaci</p>
+              <button id="btn-assign-character" class="btn btn-primary">➕ Przypisz Postać</button>
+              <button id="btn-import-character" class="btn btn-secondary">📥 Importuj</button>
+            </div>
+          </div>
+          <div id="campaign-characters" class="characters-grid"></div>
+        </div>
+
+        <!-- Map Panel -->
+        <div id="map-panel" class="session-panel">
+          <div class="map-layout">
+            <header class="map-header">
+              <div class="map-header-title">
+                <h2>🗺️ Mapa Bitwy</h2>
+                <p id="map-tool-hint" class="map-tool-hint sheet-hint">Przeciągnij tokeny. Alt+klik = wskaźnik dla wszystkich.</p>
+              </div>
+              <div class="map-tool-groups">
+                <div class="map-tool-group" role="toolbar" aria-label="Narzędzia mapy">
+                  <button type="button" class="map-tool-btn active" data-map-tool="select" title="Wybór i ruch tokenów">🖱️</button>
+                  <button type="button" class="map-tool-btn" data-map-tool="pointer" title="Wskaźnik (klik na mapę)">👆</button>
+                  <button type="button" class="map-tool-btn" data-map-tool="measure" title="Pomiar odległości w kratkach">📏</button>
+                  <button type="button" class="map-tool-btn dm-only" data-map-tool="fog-reveal" title="Odsłoń mgłę (przeciągnij)">🌫️+</button>
+                  <button type="button" class="map-tool-btn dm-only" data-map-tool="fog-hide" title="Zakryj mgłę (przeciągnij)">🌫️−</button>
+                  <button type="button" class="map-tool-btn dm-only" data-map-tool="pin" title="Dodaj pinezkę">📍</button>
+                  <button type="button" class="map-tool-btn dm-only" data-map-tool="block" title="Blokada LoS (ściany)">🧱</button>
+                  <button type="button" class="map-tool-btn dm-only" data-map-tool="block-erase" title="Usuń blokady LoS">🧱−</button>
+                </div>
+                <div class="map-tool-group map-tool-group-dm dm-only">
+                  <button id="btn-add-token" class="btn btn-sm btn-primary" type="button">➕ Token</button>
+                  <button id="btn-upload-map-bg" class="btn btn-sm btn-secondary" type="button">🖼️ Tło</button>
+                  <button id="btn-map-creator" class="btn btn-sm btn-secondary" type="button" title="Kreator map i presety">🗺️ Kreator</button>
+                  <button id="btn-map-save-preset" class="btn btn-sm btn-secondary" type="button" title="Zapisz obecną mapę jako preset">💾 Preset</button>
+                  <button id="btn-remove-map-bg" class="btn btn-sm btn-secondary" type="button">🚫 Tło</button>
+                  <button id="btn-map-undo" class="btn btn-sm btn-secondary" type="button" title="Cofnij ostatni ruch">↩</button>
+                  <button id="btn-fog-toggle" class="btn btn-sm btn-secondary" type="button">Mgła</button>
+                  <button id="btn-fog-reveal-all" class="btn btn-sm btn-secondary" type="button" title="Odsłoń całą mapę">Odsłoń wsz.</button>
+                  <button id="btn-fog-hide-all" class="btn btn-sm btn-secondary" type="button" title="Zakryj całą mapę">Zakryj wsz.</button>
+                  <button id="btn-map-clear-trails" class="btn btn-sm btn-secondary" type="button" title="Wyczyść ślady ruchu">〰️ Ślady</button>
+                  <button id="btn-map-toggle-trails" class="btn btn-sm btn-secondary" type="button" title="Włącz/wyłącz ślady">📐 Trail</button>
+                  <button id="btn-clear-map" class="btn btn-sm btn-danger" type="button">🗑️</button>
+                </div>
+                <div class="map-tool-group">
+                  <button id="btn-map-zoom-out" class="btn btn-sm btn-secondary" type="button">−</button>
+                  <button id="btn-map-zoom-in" class="btn btn-sm btn-secondary" type="button">+</button>
+                  <label class="map-grid-label">Siatka
+                    <input type="number" id="map-grid-size" value="40" min="20" max="80" class="input-sm">
+                  </label>
+                  <label class="map-grid-label dm-only">Pędzel
+                    <select id="map-fog-brush" class="input-sm">
+                      <option value="1">1</option>
+                      <option value="2" selected>2</option>
+                      <option value="3">3</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <input type="file" id="map-bg-file" accept="image/*" class="sr-only-input" tabindex="-1">
+              <input type="file" id="token-image-file" accept="image/*" class="sr-only-input" tabindex="-1">
+            </header>
+            <div class="map-workspace">
+              <aside class="map-chat-mini" id="map-chat-mini" aria-label="Mini czat mapy">
+                <div class="map-chat-mini-header">
+                  <h3>💬 Czat</h3>
+                  <button type="button" id="btn-map-chat-expand" class="btn btn-sm btn-secondary" title="Otwórz pełny czat">↗</button>
+                </div>
+                <div id="map-chat-messages" class="map-chat-messages chat-messages"></div>
+                <div class="map-chat-input-area">
+                  <select id="map-chat-type" class="input-sm map-chat-type">
+                    <option value="chat">💬</option>
+                    <option value="ic">🎭</option>
+                    <option value="whisper">🤫</option>
+                    <option value="action">⚡</option>
+                  </select>
+                  <input type="text" id="map-whisper-target" placeholder="Do kogo…" class="input-sm hidden map-whisper-target">
+                  <div class="map-chat-send">
+                    <input type="text" id="map-chat-input" placeholder="Wiadomość…" autocomplete="off">
+                    <button type="button" id="btn-map-send-chat" class="btn btn-primary btn-sm" title="Wyślij">➤</button>
+                  </div>
+                </div>
+              </aside>
+              <div class="map-combat-bar" id="map-combat-bar">
+                <div class="map-combat-bar-left">
+                  <span id="map-combat-status" class="map-combat-status"></span>
+                  <div id="map-movement-meter" class="map-movement-meter hidden">
+                    <div class="map-movement-meter-label">
+                      <span>🏃 Ruch</span>
+                      <strong id="map-movement-text">0 / 0 ft</strong>
+                    </div>
+                    <div class="map-movement-bar"><div id="map-movement-fill" class="map-movement-bar-fill"></div></div>
+                  </div>
+                  <div id="map-init-order-track" class="map-init-order-track"></div>
+                </div>
+                <div class="map-combat-bar-actions">
+                  <button type="button" id="map-btn-reset-movement" class="btn btn-sm btn-secondary dm-only hidden" title="Przywróć pełny ruch aktywnego tokena">↺ Ruch</button>
+                  <button type="button" id="map-btn-end-turn" class="btn btn-sm btn-primary" disabled>Zakończ turę</button>
+                  <button type="button" id="map-btn-combat-toggle" class="btn btn-sm btn-secondary dm-only" title="Tryb walki taktycznej">⚔ Walka</button>
+                </div>
+              </div>
+              <div class="map-container" id="map-viewport">
+                <canvas id="battle-map"></canvas>
+                <div id="map-action-wheel" class="map-action-wheel hidden" role="menu" aria-label="Koło akcji">
+                  <button type="button" data-combat-action="move" title="Ruch">🏃</button>
+                  <button type="button" data-combat-action="attack" title="Atak">⚔</button>
+                  <button type="button" data-combat-action="spell" title="Czar">✨</button>
+                  <button type="button" data-combat-action="bonus" title="Akcja dodatkowa">➕</button>
+                  <button type="button" data-combat-action="save" title="Rzut obronny">🛡</button>
+                  <button type="button" data-combat-action="end" title="Koniec tury">⏭</button>
+                </div>
+              </div>
+              <aside class="map-sidebar" id="map-sidebar">
+                <div class="map-sidebar-section" id="map-combat-sidebar">
+                  <h3>⚔ Walka na mapie</h3>
+                  <p id="map-attack-hint" class="sheet-hint">Podwójny klik aktywnego tokena otwiera koło akcji.</p>
+                  <div class="map-combat-actions">
+                    <button type="button" id="map-btn-roll-attack" class="btn btn-combat btn-full">⚔ Atak (celowanie)</button>
+                    <button type="button" id="map-btn-roll-spell" class="btn btn-spell btn-full">✨ Czar (celowanie)</button>
+                  </div>
+                  <h4>Rzuty obronne</h4>
+                  <div id="map-combat-saves" class="map-combat-saves">
+                    <button class="btn btn-save-map btn-sm" data-save="strength">ST Siła</button>
+                    <button class="btn btn-save-map btn-sm" data-save="dexterity">ST Zrę</button>
+                    <button class="btn btn-save-map btn-sm" data-save="constitution">ST Kon</button>
+                    <button class="btn btn-save-map btn-sm" data-save="intelligence">ST Int</button>
+                    <button class="btn btn-save-map btn-sm" data-save="wisdom">ST Mąd</button>
+                    <button class="btn btn-save-map btn-sm" data-save="charisma">ST Cha</button>
+                  </div>
+                </div>
+                <div class="map-sidebar-section">
+                  <h3>📊 Wybrany</h3>
+                  <div id="map-selection-stats" class="map-selection-stats">
+                    <p class="map-sidebar-empty">Kliknij token lub pinezkę</p>
+                  </div>
+                </div>
+                <div class="map-sidebar-section">
+                  <h3>📍 Pinezki <span id="map-pin-count" class="map-pin-count">0</span></h3>
+                  <div id="map-pins-list" class="map-pins-list"></div>
+                </div>
+                <div class="map-sidebar-section dm-only">
+                  <h3>⚔️ Tokeny</h3>
+                  <div id="map-tokens-list" class="map-tokens-mini-list"></div>
+                </div>
+              </aside>
+            </div>
+          </div>
+        </div>
+
+        <!-- Initiative Panel -->
+        <div id="initiative-panel" class="session-panel">
+          <div class="initiative-layout">
+            <header class="init-header">
+              <div class="init-header-title">
+                <h2>⚔️ Tracker Inicjatywy</h2>
+                <p id="initiative-turn-hint" class="initiative-turn-hint sheet-hint"></p>
+              </div>
+              <div class="init-toolbar">
+                <div class="init-toolbar-group">
+                  <button id="btn-roll-initiative" class="btn btn-primary init-btn" type="button">
+                    <span class="init-btn-icon">🎲</span>
+                    <span>Moja inicjatywa</span>
+                  </button>
+                  <button id="btn-end-turn" class="btn btn-warning init-btn init-btn-end" type="button" disabled>
+                    <span class="init-btn-icon">✓</span>
+                    <span>Zakończ turę</span>
+                  </button>
+                </div>
+                <div class="init-toolbar-group init-toolbar-dm dm-only">
+                  <button id="btn-add-initiative" class="btn btn-secondary init-btn" type="button">
+                    <span class="init-btn-icon">➕</span>
+                    <span>Dodaj</span>
+                  </button>
+                  <button id="btn-next-turn" class="btn btn-secondary init-btn hidden" type="button" title="MG: wymuś następną bez kończenia tury">
+                    <span class="init-btn-icon">⏭️</span>
+                    <span>Następna</span>
+                  </button>
+                  <button id="btn-clear-initiative" class="btn btn-danger init-btn" type="button">
+                    <span class="init-btn-icon">🗑️</span>
+                    <span>Wyczyść</span>
+                  </button>
+                </div>
+              </div>
+            </header>
+
+            <div id="init-hero" class="init-hero init-hero-idle">
+              <div class="init-hero-round">
+                <span class="init-round-label">Runda</span>
+                <span class="init-round-num" id="init-round-num">—</span>
+              </div>
+              <div class="init-hero-main">
+                <div class="init-hero-portrait" id="init-hero-portrait" aria-hidden="true">⚔️</div>
+                <div class="init-hero-copy">
+                  <span class="init-hero-status" id="init-hero-status">Gotowość do walki</span>
+                  <span class="init-hero-name" id="init-hero-name">Dodaj uczestników do kolejki</span>
+                  <span id="current-round" class="sr-only">Runda: —</span>
+                </div>
+              </div>
+              <div class="init-order-track" id="init-order-track" aria-label="Kolejność tur"></div>
+            </div>
+
+            <div id="initiative-turn-banner" class="initiative-turn-banner hidden" role="status"></div>
+            <div id="initiative-list" class="initiative-list"></div>
+          </div>
+        </div>
+
+        <!-- Notes Panel -->
+        <div id="notes-panel" class="session-panel">
+          <div class="panel-header">
+            <h2>📝 Notatki Sesji</h2>
+            <button id="btn-add-note" class="btn btn-primary">➕ Nowa Notatka</button>
+          </div>
+          <div id="notes-list" class="notes-list"></div>
+        </div>
+
+        <!-- Dice Panel -->
+        <div id="dice-panel" class="session-panel">
+          <div class="panel-layout dice-layout">
+            <div class="dice-roller-main">
+              <h2>🎲 Rzuty Kostką</h2>
+              <div class="dice-custom-roll">
+                <div class="dice-expression-builder">
+                  <div class="dice-row">
+                    <label>Ilość:</label>
+                    <input type="number" id="dice-count" value="1" min="1" max="100">
+                    <label>Kość:</label>
+                    <select id="dice-type">
+                      <option value="4">d4</option>
+                      <option value="6">d6</option>
+                      <option value="8">d8</option>
+                      <option value="10">d10</option>
+                      <option value="12">d12</option>
+                      <option value="20" selected>d20</option>
+                      <option value="100">d100</option>
+                    </select>
+                    <label>Mod:</label>
+                    <input type="number" id="dice-modifier" value="0">
+                  </div>
+                  <div class="dice-row">
+                    <label>
+                      <input type="checkbox" id="dice-advantage"> Przewaga
+                    </label>
+                    <label>
+                      <input type="checkbox" id="dice-disadvantage"> Utrudnienie
+                    </label>
+                    <label>
+                      <input type="checkbox" id="dice-secret"> Tajny rzut
+                    </label>
+                  </div>
+                  <div class="dice-row">
+                    <input type="text" id="dice-custom-expr" placeholder="np. 2d6+3, 4d8+2d4+5" class="input-wide">
+                    <button id="btn-roll-custom" class="btn btn-primary">🎲 Rzuć Wyrażenie</button>
+                  </div>
+                  <div class="dice-row dice-roll-actions">
+                    <button type="button" id="btn-roll-dice" class="btn btn-primary">🎲 Rzuć kośćmi</button>
+                  </div>
+                </div>
+              </div>
+              <div id="roll-templates-section" class="roll-templates-section hidden">
+                <h3>Szablony rzutów postaci</h3>
+                <div id="roll-templates-list" class="roll-templates-list"></div>
+              </div>
+              <div class="dice-result-area">
+                <div id="dice-result-display" class="dice-result">
+                  <div class="dice-stage" id="dice-animation" aria-hidden="true"></div>
+                  <div id="dice-result-text" class="dice-result-text"></div>
+                </div>
+              </div>
+              <!-- Ability Check Quick Rolls -->
+              <div class="ability-quick-rolls">
+                <h3>Szybkie Testy Cech</h3>
+                <p id="char-select-info" class="info-text">Wybierz postać w panelu Postacie aby odblokować rzuty na cechy</p>
+                <div id="ability-roll-buttons" class="ability-buttons">
+                  <div class="ability-group">
+                    <h4>Testy Cech</h4>
+                    <button class="btn btn-ability" data-ability="strength" disabled>Siła (STR)</button>
+                    <button class="btn btn-ability" data-ability="dexterity" disabled>Zręczność (DEX)</button>
+                    <button class="btn btn-ability" data-ability="constitution" disabled>Kondycja (CON)</button>
+                    <button class="btn btn-ability" data-ability="intelligence" disabled>Inteligencja (INT)</button>
+                    <button class="btn btn-ability" data-ability="wisdom" disabled>Mądrość (WIS)</button>
+                    <button class="btn btn-ability" data-ability="charisma" disabled>Charyzma (CHA)</button>
+                  </div>
+                  <div class="ability-group combat-group map-combat-redirect">
+                    <h4>Walka</h4>
+                    <p class="info-text">Ataki, czary i rzuty obronne są na <strong>Mapie bitwy</strong> (koło akcji po podwójnym kliku tokena).</p>
+                    <button type="button" class="btn btn-secondary btn-full" onclick="document.querySelector('.session-tab[data-panel=\'map-panel\']')?.click()">🗺️ Otwórz mapę</button>
+                  </div>
+                  <div class="ability-group spell-roll-group hidden" id="spell-roll-group" aria-hidden="true">
+                    <h4>🔮 Czary w walce</h4>
+                    <button type="button" id="btn-roll-spell" class="btn btn-spell" disabled>🔮 Rzuć czar</button>
+                    <p id="spell-roll-hint" class="info-text">Wybierz postać z listą czarów na karcie.</p>
+                    <div id="spell-quick-list" class="spell-quick-list"></div>
+                  </div>
+                  <div class="ability-group map-combat-redirect">
+                    <h4>Rzuty Obronne</h4>
+                    <p class="info-text">Użyj panelu walki na mapie lub koła akcji (🛡).</p>
+                  </div>
+                  <div class="ability-group skills-group">
+                    <h4>Umiejętności</h4>
+                    <div id="skill-roll-buttons" class="skills-buttons"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="dice-log-sidebar">
+              <h3>📜 Historia rzutów</h3>
+              <div id="dice-log" class="dice-log"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- DM Panel -->
+        <div id="dm-panel" class="session-panel">
+          <div class="panel-header">
+            <h2>👑 Panel Mistrza Gry</h2>
+          </div>
+          <div class="dm-panel-content">
+            <div class="dm-section dm-section-wide">
+              <h3>📋 Info o Kampanii</h3>
+              <div id="dm-campaign-info" class="dm-info-box"></div>
+            </div>
+            <div class="dm-section">
+              <h3>🧙 NPC</h3>
+              <button id="btn-create-npc" class="btn btn-primary">➕ Szablony NPC / Potworów</button>
+              <div id="npc-list" class="npc-list"></div>
+            </div>
+            <div class="dm-section">
+              <h3>💰 Ekonomia i handel</h3>
+              <div id="dm-economy-summary" class="dm-info-box" style="margin-bottom:8px;"></div>
+              <div class="dm-tools">
+                <button type="button" id="btn-dm-economy" class="btn btn-primary">🏪 Handlarze i łup</button>
+                <button type="button" id="btn-dm-merchant-quick" class="btn btn-secondary">➕ Handlarz</button>
+                <button type="button" id="btn-dm-loot-quick" class="btn btn-secondary">🎁 Wyślij łup</button>
+              </div>
+            </div>
+            <div class="dm-section dm-section-wide">
+              <h3>🎵 Muzyka sesji</h3>
+              <div id="dm-music-panel" class="dm-music-panel"></div>
+            </div>
+            <div class="dm-section">
+              <h3>🎯 Szybkie Narzędzia MG</h3>
+              <div class="dm-tools">
+                <button id="btn-dm-roll-table" class="btn btn-secondary">🎲 Losowa Tabela</button>
+                <button id="btn-dm-conditions" class="btn btn-secondary">📋 Stany</button>
+                <button id="btn-dm-rules-ref" class="btn btn-secondary">📖 Zasady</button>
+              </div>
+            </div>
+            <div class="dm-section">
+              <h3>📊 Postacie Graczy - Skrót</h3>
+              <div id="dm-party-overview" class="party-overview"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="campaign-music-bar" class="campaign-music-bar hidden" aria-label="Odtwarzacz muzyki sesji">
+        <div class="music-bar-main">
+          <span id="music-track-title" class="music-track-title">—</span>
+          <div class="music-bar-controls">
+            <button type="button" id="music-play-btn" class="btn btn-sm btn-secondary" data-music-action="play" title="Odtwórz / pauza" disabled>▶</button>
+            <button type="button" id="music-stop-btn" class="btn btn-sm btn-secondary" data-music-action="stop" title="Stop">⏹</button>
+            <span id="music-time-current" class="music-time">0:00</span>
+            <input type="range" id="music-seek" class="music-seek" min="0" max="100" value="0" disabled>
+            <span id="music-time-duration" class="music-time">0:00</span>
+          </div>
+        </div>
+        <div class="music-bar-volume">
+          <button type="button" id="music-mute-btn" class="btn btn-sm btn-secondary" data-music-action="mute" title="Wycisz">🔊</button>
+          <input type="range" id="music-volume" class="music-volume" min="0" max="100" value="70" title="Głośność (lokalna)">
+        </div>
+      </div>
+      <audio id="campaign-music-audio" preload="metadata"></audio>
+    </div>
+
+    <!-- Character Sheet Modal -->
+    <div id="character-modal" class="modal">
+      <div class="modal-content modal-xl">
+        <div class="modal-header">
+          <h2 id="char-modal-title">Karta Postaci</h2>
+          <p class="sheet-roll-hint">Rzut: klik etykiety/mod. cechy lub wiersz umiejętności · Ctrl+klik: biegłość</p>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body" id="character-sheet-content"></div>
+      </div>
+    </div>
+
+    <!-- Generic Modal -->
+    <div id="generic-modal" class="modal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 id="generic-modal-title"></h2>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body" id="generic-modal-body"></div>
+      </div>
+    </div>
+
+    <!-- Shop / Trade Modal -->
+    <div id="shop-modal" class="modal">
+      <div class="modal-content modal-lg">
+        <div class="modal-header">
+          <h2 id="shop-modal-title">🏪 Handlarz</h2>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body" id="shop-modal-body"></div>
+      </div>
+    </div>
+
+    <!-- Loot Modal (placeholder) -->
+    <div id="loot-modal" class="modal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>🎁 Łup</h2>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body" id="loot-modal-body"></div>
+      </div>
+    </div>
+
+    <!-- Conditions Reference Modal -->
+    <div id="conditions-modal" class="modal">
+      <div class="modal-content modal-lg">
+        <div class="modal-header">
+          <h2>📋 Stany (Conditions)</h2>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body" id="conditions-modal-body"></div>
+      </div>
+    </div>
+
+    <!-- Toast notifications -->
+    <div id="toast-container"></div>
+    <input type="file" id="char-import-file" accept=".json,application/json" class="sr-only-input" tabindex="-1">
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/dnd5e-rules.js"></script>
+  <script src="js/dnd5e-subclasses.js"></script>
+  <script src="js/dnd5e-spells.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/campaigns.js"></script>
+  <script src="js/characters.js"></script>
+  <script src="js/player-hud.js"></script>
+  <script src="js/dice.js"></script>
+  <script src="js/chat.js"></script>
+  <script src="js/campaign-music.js"></script>
+  <script src="js/map-tactics.js"></script>
+  <script src="js/map-range.js"></script>
+  <script src="js/map-los.js"></script>
+  <script src="js/map-combat.js"></script>
+  <script src="js/entity-link.js"></script>
+  <script src="js/map.js"></script>
+  <script src="js/map-creator.js"></script>
+  <script src="js/initiative.js"></script>
+  <script src="js/notes.js"></script>
+  <script src="js/dnd-npc-templates.js"></script>
+  <script src="js/economy.js"></script>
+  <script src="js/dm-economy.js"></script>
+  <script src="js/dm-panel.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
