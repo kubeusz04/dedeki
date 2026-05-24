@@ -163,6 +163,8 @@ docker exec dedeki-db pg_dump -U dedeki dedeki > backup-$(date +%F).sql
 
 | Problem | Rozwiązanie |
 |---------|-------------|
+| `#!/usr/bin/env: No such file or directory` | BOM w pliku — `git pull` (naprawiony skrypt) lub: `sed -i '1s/^\xEF\xBB\xBF//' deploy/scripts/setup-oracle.sh` |
+| Brak docker compose | `curl -fsSL https://get.docker.com \| sudo sh` potem `sudo apt install -y docker-compose-plugin` |
 | Strona się nie ładuje | Security List Oracle (3000/80) + `ufw` |
 | Błąd JWT_SECRET | Min. 32 znaki, `NODE_ENV=production` |
 | WebSocket nie działa | `SOCKET_CORS_ORIGIN` = dokładny URL (http/https) |
@@ -177,3 +179,4 @@ docker exec dedeki-db pg_dump -U dedeki dedeki > backup-$(date +%F).sql
 - [ ] `SOCKET_CORS_ORIGIN` = rzeczywisty adres użytkowników
 - [ ] Porty otwarte w Oracle Security List
 - [ ] Kopia zapasowa `.env`
+

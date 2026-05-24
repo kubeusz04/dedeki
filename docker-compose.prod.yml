@@ -34,6 +34,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
+      DATABASE_SSL: "false"
       DATABASE_URL: postgresql://${POSTGRES_USER:-dedeki}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-dedeki}
     volumes:
       - dedeki_uploads:/app/public/uploads

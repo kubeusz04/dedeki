@@ -308,19 +308,28 @@ function handleCharacterImageDelete(field) {
 
 // Middleware
 const isProduction = process.env.NODE_ENV === 'production';
+const useHttps = process.env.USE_HTTPS === 'true';
+const cspDirectives = {
+  defaultSrc: ["'self'"],
+  scriptSrc: ["'self'", "'unsafe-inline'"],
+  scriptSrcAttr: ["'unsafe-inline'", "'unsafe-hashes'"],
+  styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+  styleSrcAttr: ["'unsafe-inline'", "'unsafe-hashes'"],
+  fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+  imgSrc: ["'self'", 'data:', 'blob:'],
+  connectSrc: ["'self'", 'ws:', 'wss:']
+};
+if (useHttps) cspDirectives.upgradeInsecureRequests = [];
+
 app.use(helmet({
+  hsts: useHttps,
+  crossOriginOpenerPolicy: useHttps,
+  crossOriginEmbedderPolicy: useHttps,
+  originAgentCluster: useHttps,
+  crossOriginResourcePolicy: useHttps ? { policy: 'cross-origin' } : false,
   contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
-      // Dynamic HTML uses onclick/onchange (character sheet, map, initiative)
-      scriptSrcAttr: ["'unsafe-inline'", "'unsafe-hashes'"],
-      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-      styleSrcAttr: ["'unsafe-inline'", "'unsafe-hashes'"],
-      fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
-      imgSrc: ["'self'", 'data:', 'blob:'],
-      connectSrc: ["'self'", 'ws:', 'wss:']
-    }
+    useDefaults: false,
+    directives: cspDirectives
   }
 }));
 app.use(express.json({ limit: '5mb' }));
