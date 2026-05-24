@@ -5,25 +5,14 @@ set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-$HOME/dedeki}"
 COMPOSE_FILE="docker-compose.prod.yml"
-USE_SUDO_DOCKER=0
 
 compose_cmd() {
-  if [ "$USE_SUDO_DOCKER" = 1 ]; then
-    if sudo docker compose version >/dev/null 2>&1; then
-      printf '%s\n' 'docker compose'
-    elif command -v docker-compose >/dev/null 2>&1; then
-      printf '%s\n' 'docker-compose'
-    else
-      return 1
-    fi
+  if docker compose version >/dev/null 2>&1; then
+    printf '%s\n' 'docker compose'
+  elif command -v docker-compose >/dev/null 2>&1; then
+    printf '%s\n' 'docker-compose'
   else
-    if docker compose version >/dev/null 2>&1; then
-      printf '%s\n' 'docker compose'
-    elif command -v docker-compose >/dev/null 2>&1; then
-      printf '%s\n' 'docker-compose'
-    else
-      return 1
-    fi
+    return 1
   fi
 }
 
@@ -36,22 +25,7 @@ ensure_docker() {
   sudo apt-get install -y ca-certificates curl git
   curl -fsSL https://get.docker.com | sudo sh
   sudo usermod -aG docker "$USER" || true
-}
-
-ensure_docker_access() {
-  if docker info >/dev/null 2>&1; then
-    USE_SUDO_DOCKER=0
-    return 0
-  fi
-  if sudo docker info >/dev/null 2>&1; then
-    USE_SUDO_DOCKER=1
-    sudo usermod -aG docker "$USER" 2>/dev/null || true
-    echo "==> Brak uprawnien do Docker — uzywam sudo."
-    echo "    Po deploy: wyloguj SSH i zaloguj ponownie (grupa docker), wtedy sudo nie bedzie potrzebne."
-    return 0
-  fi
-  echo "Blad: Docker nie dziala. Sprawdz: sudo systemctl status docker"
-  exit 1
+  echo "Docker zainstalowany. Jesli pierwsza instalacja — wyloguj sie i zaloguj ponownie (grupa docker)."
 }
 
 ensure_compose() {
@@ -76,29 +50,21 @@ ensure_compose() {
 run_compose() {
   local cmd
   cmd="$(compose_cmd)"
-  if [ "$USE_SUDO_DOCKER" = 1 ]; then
-    if [ "$cmd" = 'docker compose' ]; then
-      sudo docker compose "$@"
-    else
-      sudo docker-compose "$@"
-    fi
+  if [ "$cmd" = 'docker compose' ]; then
+    docker compose "$@"
   else
-    if [ "$cmd" = 'docker compose' ]; then
-      docker compose "$@"
-    else
-      docker-compose "$@"
-    fi
+    docker-compose "$@"
   fi
 }
 
 create_env_file() {
-  local db_pass jwt origin public_ip
+  local db_pass jwt origin
   db_pass="$(openssl rand -base64 24 | tr -d '/+=' | head -c 32)"
   jwt="$(openssl rand -base64 48 | tr -d '\n')"
-  public_ip="$(curl -s ifconfig.me 2>/dev/null || curl -s icanhazip.com 2>/dev/null || echo '')"
-  origin="http://localhost:3000"
-  if [ -n "$public_ip" ]; then
-    origin="http://${public_ip}:3000"
+  origin="${SOCKET_CORS_ORIGIN:-http://localhost:3000}"
+  PUBLIC_IP="$(curl -s ifconfig.me 2>/dev/null || curl -s icanhazip.com 2>/dev/null || echo '')"
+  if [ -n "$PUBLIC_IP" ]; then
+    origin="http://${PUBLIC_IP}:3000"
   fi
   cat > .env <<EOF
 POSTGRES_DB=dedeki
@@ -124,6 +90,7 @@ ensure_env_file() {
     JWT="$(openssl rand -base64 48 | tr -d '\n')"
     sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$DB_PASS|" .env
     sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$JWT|" .env
+    echo "Wygenerowano losowe hasla w .env."
   else
     echo "==> Brak .env.example — tworze .env automatycznie"
     create_env_file
@@ -132,7 +99,6 @@ ensure_env_file() {
 
 echo "==> Dedeki: instalacja zaleznosci (Docker)"
 ensure_docker
-ensure_docker_access
 ensure_compose
 
 if [ ! -d "$REPO_DIR" ]; then
@@ -141,6 +107,7 @@ if [ ! -d "$REPO_DIR" ]; then
 fi
 
 cd "$REPO_DIR"
+
 ensure_env_file
 
 PUBLIC_IP="$(curl -s ifconfig.me 2>/dev/null || curl -s icanhazip.com 2>/dev/null || echo '')"
@@ -154,8 +121,9 @@ run_compose -f "$COMPOSE_FILE" up -d --build
 
 echo ""
 echo "==> Gotowe. Sprawdz health:"
-sleep 5
+sleep 3
 curl -sf "http://127.0.0.1:${APP_PORT:-3000}/api/health" && echo "" || run_compose -f "$COMPOSE_FILE" logs app --tail 30
 
 echo ""
 echo "Aplikacja: http://${PUBLIC_IP:-TWOJE_IP}:3000"
+echo "Logi: $(compose_cmd) -f $COMPOSE_FILE logs -f app"

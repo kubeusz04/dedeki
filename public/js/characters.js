@@ -238,24 +238,89 @@ const Characters = {
       method: 'PATCH',
       body: JSON.stringify(payload)
     });
+    if (this.activeCharacter?.id === charId) this.activeCharacter = updated;
+    if (this.myCampaignCharacter?.id === charId) this.myCampaignCharacter = updated;
+    if (this.sheetCharacter?.id === charId) {
+      this.sheetCharacter = updated;
+      const hpEl = document.querySelector('#character-sheet-content [data-field="current_hp"]');
+      const maxEl = document.querySelector('#character-sheet-content [data-field="max_hp"]');
+      const tempEl = document.querySelector('#character-sheet-content [data-field="temp_hp"]');
+      if (hpEl) hpEl.value = updated.current_hp;
+      if (maxEl && payload.max_hp !== undefined) maxEl.value = updated.max_hp;
+      if (tempEl && payload.temp_hp !== undefined) tempEl.value = updated.temp_hp;
+    }
+    if (typeof PlayerHud !== 'undefined') PlayerHud.refreshFromCharacter(updated);
     if (App.currentCampaign) {
       await this.loadCampaignCharacters();
     }
     return updated;
   },
 
-  async quickHp(charId, delta) {
+  getHpValues(charId) {
+    if (this.sheetCharacter?.id === charId) {
+      const hpEl = document.querySelector('#character-sheet-content [data-field="current_hp"]');
+      const maxEl = document.querySelector('#character-sheet-content [data-field="max_hp"]');
+      if (hpEl) {
+        return {
+          current: parseInt(hpEl.value, 10) || 0,
+          max: parseInt(maxEl?.value, 10) || 0
+        };
+      }
+    }
+    const c = [this.activeCharacter, this.myCampaignCharacter, this.sheetCharacter]
+      .find((ch) => ch?.id === charId);
+    if (c) return { current: c.current_hp || 0, max: c.max_hp || 0 };
+    return null;
+  },
+
+  readHpAmountInput(container) {
+    const input = container?.querySelector('.hp-delta-input');
+    const raw = parseInt(input?.value, 10);
+    if (Number.isNaN(raw) || raw <= 0) {
+      showToast('Wpisz dodatnią liczbę HP', 'warning');
+      return null;
+    }
+    return raw;
+  },
+
+  async applyHpDelta(charId, delta) {
     try {
-      const card = document.querySelector(`.character-card[data-id="${charId}"]`);
-      const input = card?.querySelector('.hp-quick-current');
-      if (!input) return;
-      const maxHp = parseInt(card.dataset.maxHp, 10) || 1;
-      let next = parseInt(input.value, 10) + delta;
-      next = Math.max(0, Math.min(next, maxHp));
-      await this.patchCharacterHp(charId, { current_hp: next });
+      const change = parseInt(delta, 10);
+      if (Number.isNaN(change) || change === 0) {
+        showToast('Podaj liczbę HP', 'warning');
+        return;
+      }
+      let vals = this.getHpValues(charId);
+      if (!vals) {
+        const c = await apiFetch(`/characters/${charId}`);
+        vals = { current: c.current_hp || 0, max: c.max_hp || 0 };
+      }
+      const cap = vals.max > 0 ? vals.max : 99999;
+      const next = Math.max(0, Math.min(vals.current + change, cap));
+      const updated = await this.patchCharacterHp(charId, { current_hp: next });
+      showToast(change < 0 ? `Odejmowano ${Math.abs(change)} HP` : `Dodano ${change} HP`, 'info');
+      return updated;
     } catch (err) {
       showToast(err.message, 'error');
     }
+  },
+
+  async applyHpFromCard(charId, mode) {
+    const card = document.querySelector(`.character-card[data-id="${charId}"]`);
+    const amount = this.readHpAmountInput(card);
+    if (amount == null) return;
+    await this.applyHpDelta(charId, mode === 'damage' ? -amount : amount);
+    const input = card?.querySelector('.hp-delta-input');
+    if (input) input.value = '';
+  },
+
+  async applyHpFromSheet(charId, mode) {
+    const sheet = document.getElementById('character-sheet-content');
+    const amount = this.readHpAmountInput(sheet);
+    if (amount == null) return;
+    await this.applyHpDelta(charId, mode === 'damage' ? -amount : amount);
+    const input = sheet?.querySelector('.hp-delta-input');
+    if (input) input.value = '';
   },
 
   async setQuickHp(charId, field, value) {
@@ -335,10 +400,12 @@ const Characters = {
         </div>
         ${canEdit ? `
         <div class="char-hp-quick" onclick="event.stopPropagation()">
-          <button type="button" class="btn btn-sm btn-secondary" onclick="Characters.quickHp('${c.id}', -1)">− HP</button>
+          <input type="number" class="hp-delta-input input-sm" min="1" placeholder="HP" title="Ilość do odejmowania lub leczenia">
+          <button type="button" class="btn btn-sm btn-danger" onclick="Characters.applyHpFromCard('${c.id}', 'damage')">Odejmij</button>
+          <button type="button" class="btn btn-sm btn-success" onclick="Characters.applyHpFromCard('${c.id}', 'heal')">Dodaj</button>
+          <span class="hp-quick-sep">|</span>
           <input type="number" class="hp-quick-current input-sm" value="${c.current_hp}" min="0" max="${c.max_hp}"
-            onchange="Characters.setQuickHp('${c.id}', 'current_hp', this.value)">
-          <button type="button" class="btn btn-sm btn-secondary" onclick="Characters.quickHp('${c.id}', 1)">+ HP</button>
+            title="Aktualne HP" onchange="Characters.setQuickHp('${c.id}', 'current_hp', this.value)">
           <label class="hp-temp-label">Temp</label>
           <input type="number" class="input-sm" value="${c.temp_hp}" min="0"
             onchange="Characters.setQuickHp('${c.id}', 'temp_hp', this.value)">
@@ -479,12 +546,11 @@ const Characters = {
               <span>Temp:</span>
               <input type="number" value="${c.temp_hp}" data-field="temp_hp" style="width:60px;" ${canEdit ? '' : 'disabled'}>
             </div>
-            ${canEdit ? `<div style="display:flex;gap:6px;margin-top:8px;">
-              <button class="btn btn-sm btn-danger" onclick="Characters.adjustHp('${c.id}', -1)">-1 HP</button>
-              <button class="btn btn-sm btn-danger" onclick="Characters.adjustHp('${c.id}', -5)">-5 HP</button>
-              <button class="btn btn-sm btn-success" onclick="Characters.adjustHp('${c.id}', 1)">+1 HP</button>
-              <button class="btn btn-sm btn-success" onclick="Characters.adjustHp('${c.id}', 5)">+5 HP</button>
-              <button class="btn btn-sm btn-warning" onclick="Characters.fullHeal('${c.id}')">Full Heal</button>
+            ${canEdit ? `<div class="hp-adjust-row" style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+              <input type="number" class="hp-delta-input input-sm" min="1" placeholder="ilość" style="width:72px;" title="Ilość HP">
+              <button type="button" class="btn btn-sm btn-danger" onclick="Characters.applyHpFromSheet('${c.id}', 'damage')">Odejmij HP</button>
+              <button type="button" class="btn btn-sm btn-success" onclick="Characters.applyHpFromSheet('${c.id}', 'heal')">Dodaj HP</button>
+              <button type="button" class="btn btn-sm btn-warning" onclick="Characters.fullHeal('${c.id}')">Pełne leczenie</button>
             </div>` : ''}
           </div>
 
@@ -728,22 +794,18 @@ const Characters = {
     }
   },
 
-  async adjustHp(charId, amount) {
-    const hpInput = document.querySelector('#character-sheet-content [data-field="current_hp"]');
-    const maxHpInput = document.querySelector('#character-sheet-content [data-field="max_hp"]');
-    if (hpInput) {
-      let newHp = parseInt(hpInput.value) + amount;
-      const maxHp = parseInt(maxHpInput?.value || 0);
-      newHp = Math.max(0, Math.min(newHp, maxHp));
-      hpInput.value = newHp;
-    }
-  },
-
   async fullHeal(charId) {
-    const hpInput = document.querySelector('#character-sheet-content [data-field="current_hp"]');
-    const maxHpInput = document.querySelector('#character-sheet-content [data-field="max_hp"]');
-    if (hpInput && maxHpInput) {
-      hpInput.value = maxHpInput.value;
+    try {
+      const maxHpInput = document.querySelector('#character-sheet-content [data-field="max_hp"]');
+      const maxHp = parseInt(maxHpInput?.value, 10);
+      if (Number.isNaN(maxHp) || maxHp < 1) {
+        showToast('Ustaw poprawne max HP', 'warning');
+        return;
+      }
+      await this.patchCharacterHp(charId, { current_hp: maxHp });
+      showToast('Pełne leczenie', 'success');
+    } catch (err) {
+      showToast(err.message, 'error');
     }
   },
 
@@ -969,7 +1031,7 @@ const Characters = {
   showImportDialog() {
     const inCampaign = !!App.currentCampaign;
     const html = `
-      <p class="sheet-hint">Wybierz plik <strong>.dedeki.json</strong> wyeksportowany z Dedeki (lub kompatybilny JSON postaci).</p>
+      <p class="sheet-hint">Wybierz plik <strong>.dedeki.json</strong> wyeksportowany z Roll 1 (lub kompatybilny JSON postaci).</p>
       ${inCampaign ? `<label style="display:block;margin:12px 0;"><input type="checkbox" id="char-import-assign" checked> Przypisz do bieżącej kampanii (${escapeHtml(App.currentCampaign.name)})</label>` : ''}
       <button type="button" class="btn btn-primary btn-full" id="char-import-pick">📂 Wybierz plik JSON</button>
     `;

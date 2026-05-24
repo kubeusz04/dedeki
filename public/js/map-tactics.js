@@ -186,6 +186,189 @@ const MapTactics = {
     if (range && /\d/.test(range)) return 'ranged';
     if (props.includes('thrown')) return 'ranged';
     return 'melee';
+  },
+
+  TERRAIN_MOVEMENT_MULT: {
+    difficult: 2, ice: 2, mud: 2, fire: 2, acid: 2, poison: 2, water: 2
+  },
+
+  FACING_DELTAS: [
+    { dx: 0, dy: -1 }, { dx: 1, dy: -1 }, { dx: 1, dy: 0 }, { dx: 1, dy: 1 },
+    { dx: 0, dy: 1 }, { dx: -1, dy: 1 }, { dx: -1, dy: 0 }, { dx: -1, dy: -1 }
+  ],
+
+  parseZonesList(raw) {
+    if (!raw) return [];
+    let arr = raw;
+    if (typeof raw === 'string') {
+      try { arr = JSON.parse(raw); } catch { return []; }
+    }
+    return Array.isArray(arr) ? arr : [];
+  },
+
+  zonesToJson(zones) {
+    return JSON.stringify(zones || []);
+  },
+
+  cellKey(x, y) {
+    return `${x},${y}`;
+  },
+
+  parseCellKey(key) {
+    const [xs, ys] = String(key).split(',');
+    return { x: parseInt(xs, 10), y: parseInt(ys, 10) };
+  },
+
+  facingFromCells(ox, oy, tx, ty) {
+    const dx = tx - ox;
+    const dy = ty - oy;
+    if (dx === 0 && dy === 0) return 0;
+    const angle = Math.atan2(dy, dx);
+    const oct = Math.round(angle / (Math.PI / 4));
+    return ((oct % 8) + 8) % 8;
+  },
+
+  getCellsInRadius(cx, cy, radiusCells, gw, gh) {
+    const cells = [];
+    const r = Math.max(0, radiusCells);
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        const dist = Math.hypot(x - cx, y - cy);
+        if (dist <= r + 0.5) cells.push(this.cellKey(x, y));
+      }
+    }
+    return cells;
+  },
+
+  getCellsInSquare(cx, cy, sizeCells, gw, gh) {
+    const cells = [];
+    const n = Math.max(1, sizeCells);
+    const half = Math.floor(n / 2);
+    for (let dy = 0; dy < n; dy++) {
+      for (let dx = 0; dx < n; dx++) {
+        const x = cx - half + dx;
+        const y = cy - half + dy;
+        if (x >= 0 && y >= 0 && x < gw && y < gh) cells.push(this.cellKey(x, y));
+      }
+    }
+    return cells;
+  },
+
+  getCellsInCone(ox, oy, facing, lengthCells, gw, gh) {
+    const cells = [];
+    const len = Math.max(1, lengthCells);
+    const angleCenter = (facing % 8) * (Math.PI / 4);
+    const halfArc = Math.PI / 4;
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        const dx = x - ox;
+        const dy = y - oy;
+        const dist = Math.max(Math.abs(dx), Math.abs(dy));
+        if (dist === 0 || dist > len) continue;
+        let angle = Math.atan2(dy, dx);
+        let diff = angle - angleCenter;
+        while (diff > Math.PI) diff -= 2 * Math.PI;
+        while (diff < -Math.PI) diff += 2 * Math.PI;
+        if (Math.abs(diff) <= halfArc + 0.05) cells.push(this.cellKey(x, y));
+      }
+    }
+    return cells;
+  },
+
+  getCellsInLine(ox, oy, ex, ey, widthCells, gw, gh) {
+    const line = this.bresenhamLine(ox, oy, ex, ey);
+    const w = Math.max(1, widthCells || 1);
+    const half = Math.floor((w - 1) / 2);
+    const set = new Set();
+    const perp = this.FACING_DELTAS[this.facingFromCells(ox, oy, ex, ey)];
+    const px = perp.dy !== 0 ? 1 : 0;
+    const py = perp.dx !== 0 ? 1 : 0;
+    line.forEach((c) => {
+      for (let o = -half; o <= half + (w % 2 ? 0 : 0); o++) {
+        const x = c.x + px * o;
+        const y = c.y + py * o;
+        if (x >= 0 && y >= 0 && x < gw && y < gh) set.add(this.cellKey(x, y));
+      }
+    });
+    return Array.from(set);
+  },
+
+  resolveZoneCells(zone, gw, gh) {
+    if (!zone) return [];
+    if (zone.shape === 'cells' && Array.isArray(zone.cells) && zone.cells.length) {
+      return zone.cells.filter((k) => {
+        const { x, y } = this.parseCellKey(k);
+        return x >= 0 && y >= 0 && x < gw && y < gh;
+      });
+    }
+    const origin = zone.origin || { x: 0, y: 0 };
+    const ox = origin.x ?? 0;
+    const oy = origin.y ?? 0;
+    switch (zone.shape) {
+      case 'circle':
+        return this.getCellsInRadius(ox, oy, zone.radiusCells || 1, gw, gh);
+      case 'square':
+        return this.getCellsInSquare(ox, oy, zone.sizeCells || 2, gw, gh);
+      case 'cone':
+        return this.getCellsInCone(ox, oy, zone.facing ?? 0, zone.lengthCells || 3, gw, gh);
+      case 'line': {
+        const end = zone.end || { x: ox + 1, y: oy };
+        return this.getCellsInLine(ox, oy, end.x, end.y, zone.widthCells || 1, gw, gh);
+      }
+      default:
+        return Array.isArray(zone.cells) ? zone.cells : [];
+    }
+  },
+
+  buildTerrainIndex(zones) {
+    const index = new Map();
+    (zones || []).forEach((zone) => {
+      if (zone.kind !== 'terrain' && !zone.terrainType) return;
+      const mult = this.TERRAIN_MOVEMENT_MULT[zone.terrainType] || 1;
+      if (mult <= 1) return;
+      const cells = zone.cells?.length
+        ? zone.cells
+        : this.resolveZoneCells(zone, 999, 999);
+      cells.forEach((key) => {
+        const prev = index.get(key) || 1;
+        index.set(key, Math.max(prev, mult));
+      });
+    });
+    return index;
+  },
+
+  movementCostAlongPath(fromX, fromY, toX, toY, terrainIndex) {
+    const line = this.bresenhamLine(fromX, fromY, toX, toY);
+    let total = 0;
+    for (let i = 1; i < line.length; i++) {
+      const key = this.cellKey(line[i].x, line[i].y);
+      const mult = terrainIndex?.get(key) || 1;
+      total += this.FT_PER_SQUARE * mult;
+    }
+    return total;
+  },
+
+  clampByMovementCost(fromX, fromY, toX, toY, maxFt, terrainIndex) {
+    const line = this.bresenhamLine(fromX, fromY, toX, toY);
+    let spent = 0;
+    let last = { x: fromX, y: fromY };
+    for (let i = 1; i < line.length; i++) {
+      const key = this.cellKey(line[i].x, line[i].y);
+      const mult = terrainIndex?.get(key) || 1;
+      const step = this.FT_PER_SQUARE * mult;
+      if (spent + step > maxFt) break;
+      spent += step;
+      last = { x: line[i].x, y: line[i].y };
+    }
+    return { ...last, costFt: spent };
+  },
+
+  tokensInZoneCells(tokens, cellKeys) {
+    const set = new Set(cellKeys || []);
+    return (tokens || []).filter((t) => {
+      const a = this.tokenAnchor(t);
+      return set.has(this.cellKey(a.x, a.y));
+    });
   }
 };
 

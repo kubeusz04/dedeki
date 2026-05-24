@@ -1,4 +1,4 @@
-﻿# Produkcja: PostgreSQL + aplikacja Node (Oracle Free Tier, VPS, itp.)
+# Produkcja: PostgreSQL + aplikacja Node (Oracle Free Tier, VPS, itp.)
 # Uruchomienie: docker compose -f docker-compose.prod.yml up -d --build
 
 services:

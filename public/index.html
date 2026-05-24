@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Dedeki - D&D Virtual Tabletop</title>
+  <title>Roll 1 - D&D Virtual Tabletop</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚔️</text></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -14,13 +14,13 @@
   <script>
     if (location.protocol === 'file:') {
       document.body.innerHTML = '<div style="max-width:520px;margin:80px auto;padding:24px;font-family:Georgia,serif;line-height:1.6;color:#2c1810;background:#e8dcc8;border:2px solid #6b4a2a;border-radius:6px;">' +
-        '<h1 style="margin:0 0 12px;font-size:1.4rem;">Dedeki — uruchom przez serwer</h1>' +
+        '<h1 style="margin:0 0 12px;font-size:1.4rem;">Roll 1 — uruchom przez serwer</h1>' +
         '<p>Nie otwieraj pliku <code>index.html</code> z eksploratora. Najpierw w terminalu w folderze projektu:</p>' +
         '<pre style="background:#d9cbb0;padding:12px;border-radius:4px;overflow:auto;">npm run db:up\nnpm start</pre>' +
         '<p>Potem wejdź w przeglądarce na:</p>' +
         '<p><a href="http://localhost:3000" style="color:#6e2e21;font-weight:bold;">http://localhost:3000</a></p>' +
         '</div>';
-      throw new Error('Dedeki must be served over HTTP');
+      throw new Error('Roll 1 must be served over HTTP');
     }
   </script>
   <div id="app">
@@ -30,7 +30,7 @@
         <div class="auth-header">
           <div class="logo">
             <span class="logo-icon">⚔️</span>
-            <h1>Dedeki</h1>
+            <h1>Roll 1</h1>
             <p class="subtitle">Kronika Przygód · D&amp;D 5e</p>
           </div>
         </div>
@@ -78,7 +78,7 @@
       <header class="main-header">
         <div class="header-left">
           <span class="logo-icon-sm">⚔️</span>
-          <span class="header-title">Dedeki</span>
+          <span class="header-title">Roll 1</span>
         </div>
         <div class="header-right">
           <span id="user-display-name" class="user-name"></span>
@@ -198,6 +198,12 @@
         <!-- Map Panel -->
         <div id="map-panel" class="session-panel">
           <div class="map-layout">
+            <div id="map-stage" class="map-stage">
+              <div class="map-fs-rail map-fs-rail-left" aria-hidden="true"></div>
+              <div class="map-fs-rail map-fs-rail-right" aria-hidden="true"></div>
+              <div class="map-fs-rail map-fs-rail-top" aria-hidden="true"></div>
+              <button type="button" id="btn-map-fullscreen" class="map-fs-toggle btn btn-sm btn-secondary" title="Pełny ekran mapy (F)">⛶</button>
+            <div class="map-top-dock map-fs-panel map-fs-panel-top">
             <header class="map-header">
               <div class="map-header-title">
                 <h2>🗺️ Mapa Bitwy</h2>
@@ -213,6 +219,10 @@
                   <button type="button" class="map-tool-btn dm-only" data-map-tool="pin" title="Dodaj pinezkę">📍</button>
                   <button type="button" class="map-tool-btn dm-only" data-map-tool="block" title="Blokada LoS (ściany)">🧱</button>
                   <button type="button" class="map-tool-btn dm-only" data-map-tool="block-erase" title="Usuń blokady LoS">🧱−</button>
+                  <button type="button" class="map-tool-btn dm-only" data-map-tool="terrain-paint" title="Maluj teren (trudny, lód…)">🏔️</button>
+                  <button type="button" class="map-tool-btn dm-only" data-map-tool="terrain-erase" title="Gumka terenu">🏔️−</button>
+                  <button type="button" class="map-tool-btn dm-only" data-map-tool="zone-square" title="Strefa kwadratowa">▢</button>
+                  <button type="button" class="btn btn-sm btn-secondary dm-only" id="btn-map-place-prop" type="button" title="Postaw rekwizyt (beczka, skrzynia…)">📦</button>
                 </div>
                 <div class="map-tool-group map-tool-group-dm dm-only">
                   <button id="btn-add-token" class="btn btn-sm btn-primary" type="button">➕ Token</button>
@@ -231,8 +241,15 @@
                 <div class="map-tool-group">
                   <button id="btn-map-zoom-out" class="btn btn-sm btn-secondary" type="button">−</button>
                   <button id="btn-map-zoom-in" class="btn btn-sm btn-secondary" type="button">+</button>
-                  <label class="map-grid-label">Siatka
+                  <label class="map-grid-label dm-only">Siatka
                     <input type="number" id="map-grid-size" value="40" min="20" max="80" class="input-sm">
+                  </label>
+                  <label class="map-grid-label map-grid-opacity-label dm-only" title="Przezroczystość linii i etykiet siatki">
+                    Widoczność siatki
+                    <span class="map-grid-opacity-wrap">
+                      <input type="range" id="map-grid-opacity" min="0" max="100" value="100" class="map-grid-opacity-slider">
+                      <output id="map-grid-opacity-value" for="map-grid-opacity">100%</output>
+                    </span>
                   </label>
                   <label class="map-grid-label dm-only">Pędzel
                     <select id="map-fog-brush" class="input-sm">
@@ -241,13 +258,45 @@
                       <option value="3">3</option>
                     </select>
                   </label>
+                  <label class="map-grid-label dm-only" title="Typ malowanego terenu">
+                    Teren
+                    <select id="map-zone-terrain-select" class="input-sm">
+                      <option value="difficult">Trudny</option>
+                      <option value="ice">Lód</option>
+                      <option value="mud">Błoto</option>
+                      <option value="fire">Ogień</option>
+                      <option value="acid">Kwas</option>
+                      <option value="poison">Trucizna</option>
+                      <option value="water">Woda</option>
+                    </select>
+                  </label>
+                  <button type="button" id="btn-map-fullscreen-header" class="btn btn-sm btn-secondary" title="Pełny ekran (F)">⛶ Pełny ekran</button>
                 </div>
               </div>
               <input type="file" id="map-bg-file" accept="image/*" class="sr-only-input" tabindex="-1">
               <input type="file" id="token-image-file" accept="image/*" class="sr-only-input" tabindex="-1">
             </header>
+              <div class="map-combat-bar" id="map-combat-bar">
+                <div class="map-combat-bar-left">
+                  <span id="map-combat-status" class="map-combat-status"></span>
+                  <div id="map-movement-meter" class="map-movement-meter hidden">
+                    <div class="map-movement-meter-label">
+                      <span>🏃 Ruch</span>
+                      <strong id="map-movement-text">0 / 0 ft</strong>
+                    </div>
+                    <div class="map-movement-bar"><div id="map-movement-fill" class="map-movement-bar-fill"></div></div>
+                  </div>
+                  <div id="map-init-order-track" class="map-init-order-track"></div>
+                </div>
+                <div class="map-combat-bar-actions">
+                  <button type="button" id="map-btn-reset-movement" class="btn btn-sm btn-secondary dm-only hidden" title="Przywróć pełny ruch aktywnego tokena">↺ Ruch</button>
+                  <button type="button" id="map-btn-end-turn" class="btn btn-sm btn-primary" disabled>Zakończ turę</button>
+                  <button type="button" id="map-btn-combat-toggle" class="btn btn-sm btn-secondary dm-only" title="Tryb walki taktycznej">⚔ Walka</button>
+                </div>
+              </div>
+            </div>
             <div class="map-workspace">
-              <aside class="map-chat-mini" id="map-chat-mini" aria-label="Mini czat mapy">
+              <aside class="map-chat-mini map-fs-panel map-fs-panel-left" id="map-chat-mini" aria-label="Mini czat mapy">
                 <div class="map-chat-mini-header">
                   <h3>💬 Czat</h3>
                   <button type="button" id="btn-map-chat-expand" class="btn btn-sm btn-secondary" title="Otwórz pełny czat">↗</button>
@@ -267,24 +316,6 @@
                   </div>
                 </div>
               </aside>
-              <div class="map-combat-bar" id="map-combat-bar">
-                <div class="map-combat-bar-left">
-                  <span id="map-combat-status" class="map-combat-status"></span>
-                  <div id="map-movement-meter" class="map-movement-meter hidden">
-                    <div class="map-movement-meter-label">
-                      <span>🏃 Ruch</span>
-                      <strong id="map-movement-text">0 / 0 ft</strong>
-                    </div>
-                    <div class="map-movement-bar"><div id="map-movement-fill" class="map-movement-bar-fill"></div></div>
-                  </div>
-                  <div id="map-init-order-track" class="map-init-order-track"></div>
-                </div>
-                <div class="map-combat-bar-actions">
-                  <button type="button" id="map-btn-reset-movement" class="btn btn-sm btn-secondary dm-only hidden" title="Przywróć pełny ruch aktywnego tokena">↺ Ruch</button>
-                  <button type="button" id="map-btn-end-turn" class="btn btn-sm btn-primary" disabled>Zakończ turę</button>
-                  <button type="button" id="map-btn-combat-toggle" class="btn btn-sm btn-secondary dm-only" title="Tryb walki taktycznej">⚔ Walka</button>
-                </div>
-              </div>
               <div class="map-container" id="map-viewport">
                 <canvas id="battle-map"></canvas>
                 <div id="map-action-wheel" class="map-action-wheel hidden" role="menu" aria-label="Koło akcji">
@@ -296,13 +327,14 @@
                   <button type="button" data-combat-action="end" title="Koniec tury">⏭</button>
                 </div>
               </div>
-              <aside class="map-sidebar" id="map-sidebar">
+              <aside class="map-sidebar map-fs-panel map-fs-panel-right" id="map-sidebar">
                 <div class="map-sidebar-section" id="map-combat-sidebar">
                   <h3>⚔ Walka na mapie</h3>
                   <p id="map-attack-hint" class="sheet-hint">Podwójny klik aktywnego tokena otwiera koło akcji.</p>
                   <div class="map-combat-actions">
                     <button type="button" id="map-btn-roll-attack" class="btn btn-combat btn-full">⚔ Atak (celowanie)</button>
                     <button type="button" id="map-btn-roll-spell" class="btn btn-spell btn-full">✨ Czar (celowanie)</button>
+                    <button type="button" id="btn-map-spell-aoe" class="btn btn-spell btn-full dm-only">💥 Czar na mapę (AoE)</button>
                   </div>
                   <h4>Rzuty obronne</h4>
                   <div id="map-combat-saves" class="map-combat-saves">
@@ -320,6 +352,11 @@
                     <p class="map-sidebar-empty">Kliknij token lub pinezkę</p>
                   </div>
                 </div>
+                <div class="map-sidebar-section dm-only">
+                  <h3>🗺️ Strefy mapy</h3>
+                  <div id="map-zones-list" class="map-zones-list"></div>
+                  <button type="button" id="btn-map-zones-clear" class="btn btn-sm btn-danger btn-full" style="margin-top:8px">Wyczyść strefy</button>
+                </div>
                 <div class="map-sidebar-section">
                   <h3>📍 Pinezki <span id="map-pin-count" class="map-pin-count">0</span></h3>
                   <div id="map-pins-list" class="map-pins-list"></div>
@@ -329,6 +366,7 @@
                   <div id="map-tokens-list" class="map-tokens-mini-list"></div>
                 </div>
               </aside>
+            </div>
             </div>
           </div>
         </div>
@@ -632,11 +670,16 @@
   <script src="/js/chat.js"></script>
   <script src="/js/campaign-music.js"></script>
   <script src="/js/map-tactics.js"></script>
+  <script src="/js/map-zone-types.js"></script>
+  <script src="/js/map-zones.js"></script>
+  <script src="/js/map-prop-templates.js"></script>
+  <script src="/js/map-props.js"></script>
   <script src="/js/map-range.js"></script>
   <script src="/js/map-los.js"></script>
   <script src="/js/map-combat.js"></script>
   <script src="/js/entity-link.js"></script>
   <script src="/js/map.js"></script>
+  <script src="/js/map-fullscreen.js"></script>
   <script src="/js/map-creator.js"></script>
   <script src="/js/initiative.js"></script>
   <script src="/js/notes.js"></script>

@@ -24,6 +24,7 @@ const BattleMap = {
   isDragging: false,
   isPaintingFog: false,
   isPaintingBlock: false,
+  isPaintingTerrain: false,
   backgroundImageObj: null,
   backgroundImageSrc: '',
   tokenImageCache: new Map(),
@@ -72,6 +73,23 @@ const BattleMap = {
         App.socket.emit('map-update-settings', { grid_size: parseInt(e.target.value, 10) });
       }
     });
+
+    this._gridOpacityDebounce = null;
+    const opacitySlider = document.getElementById('map-grid-opacity');
+    const opacityOut = document.getElementById('map-grid-opacity-value');
+    opacitySlider?.addEventListener('input', (e) => {
+      const v = parseInt(e.target.value, 10);
+      if (opacityOut) opacityOut.textContent = `${v}%`;
+      if (this.settings) {
+        this.settings.grid_opacity = v;
+        this.render();
+      }
+      if (!this.isDm() || !App.socket) return;
+      clearTimeout(this._gridOpacityDebounce);
+      this._gridOpacityDebounce = setTimeout(() => {
+        App.socket.emit('map-update-settings', { grid_opacity: v });
+      }, 180);
+    });
     document.getElementById('map-bg-file')?.addEventListener('change', (e) => this.onBackgroundFileSelected(e));
     document.getElementById('token-image-file')?.addEventListener('change', (e) => this.onTokenImageSelected(e));
 
@@ -111,6 +129,9 @@ const BattleMap = {
     });
 
     this.setTool('select');
+    if (typeof MapFullscreen !== 'undefined') MapFullscreen.init();
+    if (typeof MapZones !== 'undefined') MapZones.init();
+    document.getElementById('btn-map-place-prop')?.addEventListener('click', () => this.openPropPlacementPicker());
   },
 
   isDm() {
@@ -143,7 +164,11 @@ const BattleMap = {
       'fog-hide': 'Przeciągnij, aby zakryć obszar ponownie.',
       pin: 'Kliknij komórkę, aby dodać pinezkę (MG).',
       block: 'Maluj ściany/blokady LoS (MG). Kliknij ponownie, aby wyłączyć.',
-      'block-erase': 'Usuń blokady LoS (MG).'
+      'block-erase': 'Usuń blokady LoS (MG).',
+      'terrain-paint': 'Maluj trudny teren / efekt (MG).',
+      'terrain-erase': 'Gumka terenu (MG).',
+      'zone-square': 'Strefa kwadratowa — kliknij i przeciągnij (MG).',
+      'prop-place': 'Kliknij mapę, aby postawić wybrany rekwizyt (MG).'
     };
     const hintEl = document.getElementById('map-tool-hint');
     if (hintEl) hintEl.textContent = hints[mode] || hints.select;
@@ -151,6 +176,7 @@ const BattleMap = {
       this.measureStart = null;
       this.measureEnd = null;
     }
+    if (typeof MapZones !== 'undefined') MapZones.cancelPlacement();
     this.render();
   },
 
@@ -209,7 +235,8 @@ const BattleMap = {
       fog_enabled: 0,
       fog_revealed: '[]',
       movement_trails: '{}',
-      trails_enabled: 1
+      trails_enabled: 1,
+      grid_opacity: 100
     };
     if (!this.isDm() && this.settings) {
       delete this.settings.last_token_move;
@@ -219,10 +246,22 @@ const BattleMap = {
     if (data.combat && typeof MapCombat !== 'undefined') {
       MapCombat.update(data.combat);
     }
+    if (typeof MapZones !== 'undefined') {
+      let zones = data.settings?.map_zones;
+      if (typeof zones === 'string') {
+        try { zones = JSON.parse(zones); } catch { zones = []; }
+      }
+      MapZones.load(zones || []);
+    }
 
     if (document.getElementById('map-grid-size')) {
       document.getElementById('map-grid-size').value = this.settings.grid_size;
     }
+    const opacitySlider = document.getElementById('map-grid-opacity');
+    const opacityOut = document.getElementById('map-grid-opacity-value');
+    const opacity = this.settings.grid_opacity ?? 100;
+    if (opacitySlider) opacitySlider.value = opacity;
+    if (opacityOut) opacityOut.textContent = `${opacity}%`;
 
     const nextBackground = this.settings.background_image || '';
     if (nextBackground !== prevBackground) {
@@ -376,6 +415,10 @@ const BattleMap = {
     this.drawMovementTrails(ctx, gs);
     this.drawGrid(ctx, w, h, gs);
 
+    if (typeof MapZones !== 'undefined') {
+      MapZones.draw(ctx, gs);
+    }
+
     if (fogEnabled && isDm) {
       this.drawDmFogPreview(ctx, gs, w, h);
     }
@@ -443,7 +486,12 @@ const BattleMap = {
   },
 
   drawGrid(ctx, w, h, gs) {
-    ctx.strokeStyle = 'rgba(201, 162, 39, 0.12)';
+    const raw = this.settings.grid_opacity;
+    const opacityPct = raw === undefined || raw === null ? 100 : parseInt(raw, 10);
+    if (opacityPct <= 0) return;
+
+    const alpha = Math.max(0, Math.min(100, opacityPct)) / 100;
+    ctx.strokeStyle = `rgba(201, 162, 39, ${0.12 * alpha})`;
     ctx.lineWidth = 1;
     for (let x = 0; x <= w; x += gs) {
       ctx.beginPath();
@@ -457,7 +505,7 @@ const BattleMap = {
       ctx.lineTo(w, y);
       ctx.stroke();
     }
-    ctx.fillStyle = 'rgba(201, 178, 140, 0.35)';
+    ctx.fillStyle = `rgba(201, 178, 140, ${0.35 * alpha})`;
     ctx.font = '10px Crimson Pro, Georgia, serif';
     for (let x = 0; x < this.settings.grid_width; x++) {
       ctx.fillText(String.fromCharCode(65 + (x % 26)), x * gs + 3, 12);
@@ -665,6 +713,7 @@ const BattleMap = {
     const shortName = name.length > 5 ? name.substring(0, 5) : name;
     if (!img) ctx.fillText(shortName, cx, cy);
     else ctx.fillText(shortName, cx, ty + size - 8);
+    if (typeof MapProps !== 'undefined') MapProps.drawTokenOverlay(ctx, token, gs);
     ctx.textAlign = 'start';
     ctx.textBaseline = 'alphabetic';
 
@@ -793,6 +842,28 @@ const BattleMap = {
       return;
     }
 
+    if (this.isDm() && (this.toolMode === 'terrain-paint' || this.toolMode === 'terrain-erase')) {
+      this.isPaintingTerrain = true;
+      if (this.toolMode === 'terrain-paint') MapZones.paintTerrainCell(cell.x, cell.y);
+      else MapZones.eraseTerrainCell(cell.x, cell.y);
+      return;
+    }
+
+    if (this.isDm() && this.toolMode === 'zone-square') {
+      MapZones.startPlacement('square', { sizeCells: 2 });
+      MapZones.onMouseDown(cell);
+      return;
+    }
+
+    if (typeof MapZones !== 'undefined' && MapZones.placement) {
+      if (MapZones.onMouseDown(cell)) return;
+    }
+
+    if (this.toolMode === 'prop-place' && this.isDm()) {
+      this.placePropAt(cell);
+      return;
+    }
+
     if (this.toolMode === 'measure') {
       if (!this.measureStart) {
         this.measureStart = { x: cell.x, y: cell.y };
@@ -871,6 +942,20 @@ const BattleMap = {
       return;
     }
 
+    if (this.isPaintingTerrain) {
+      const cell = this.cellAt(mx, my);
+      if (this.toolMode === 'terrain-paint') MapZones.paintTerrainCell(cell.x, cell.y);
+      else MapZones.eraseTerrainCell(cell.x, cell.y);
+      this.render();
+      return;
+    }
+
+    if (typeof MapZones !== 'undefined' && MapZones.placement) {
+      const cell = this.cellAt(mx, my);
+      MapZones.onMouseMove(cell);
+      return;
+    }
+
     if (this.toolMode === 'measure' && this.measureStart && !this.measureEnd) {
       const cell = this.cellAt(mx, my);
       this.measureEnd = { x: cell.x, y: cell.y };
@@ -888,8 +973,13 @@ const BattleMap = {
       Math.floor((my - this.dragOffset.y + gs / 2) / gs)));
 
     if (this.dragMaxFt != null && this.dragStartX != null && typeof MapTactics !== 'undefined') {
-      const maxCells = MapTactics.feetToCells(this.dragMaxFt);
-      const clamped = MapTactics.clampChebyshev(this.dragStartX, this.dragStartY, nx, ny, maxCells);
+      let clamped;
+      if (typeof MapZones !== 'undefined' && MapZones.zones?.length) {
+        clamped = MapZones.clampDrag(this.dragStartX, this.dragStartY, nx, ny, this.dragMaxFt);
+      } else {
+        const maxCells = MapTactics.feetToCells(this.dragMaxFt);
+        clamped = MapTactics.clampChebyshev(this.dragStartX, this.dragStartY, nx, ny, maxCells);
+      }
       nx = Math.max(0, Math.min(maxX, clamped.x));
       ny = Math.max(0, Math.min(maxY, clamped.y));
     }
@@ -906,6 +996,11 @@ const BattleMap = {
     }
     if (this.isPaintingBlock) {
       this.isPaintingBlock = false;
+      return;
+    }
+    if (this.isPaintingTerrain) {
+      this.isPaintingTerrain = false;
+      MapZones.onMouseUp();
       return;
     }
     if (this.isDragging && this.dragToken && App.socket) {
@@ -1140,9 +1235,11 @@ const BattleMap = {
   },
 
   showTokenContextMenu(token) {
+    const isProp = typeof MapProps !== 'undefined' && MapProps.getTemplateForToken(token);
+    const propLine = isProp ? ', 7 = aktywuj efekt rekwizytu' : '';
     const action = prompt(
-      `Token: ${token.entity_name}\n` +
-      '1 = usuń, 2 = zablokuj/odblokuj, 3 = grafika, 4 = powiąż postać/NPC, 5 = statystyki, 6 = inicjatywa',
+      `Token: ${token.entity_name}${isProp ? '\n' + MapProps.displayHint(token) : ''}\n` +
+      `1 = usuń, 2 = zablokuj/odblokuj, 3 = grafika, 4 = powiąż postać/NPC, 5 = statystyki, 6 = inicjatywa${propLine}`,
       ''
     );
     if (action === '1') {
@@ -1172,7 +1269,54 @@ const BattleMap = {
         });
         showToast('Dodano do inicjatywy', 'success');
       }
+    } else if (action === '7' && isProp && this.isDm()) {
+      App.socket?.emit('map-trigger-prop', { tokenId: token.id });
+      showToast('Aktywowano rekwizyt', 'info');
     }
+  },
+
+  _pendingPropTemplate: null,
+
+  openPropPlacementPicker() {
+    if (!this.isDm()) return;
+    const templates = typeof MapPropTemplates !== 'undefined' ? MapPropTemplates.all() : [];
+    const rows = templates.map((t) =>
+      `<button type="button" class="btn btn-secondary btn-full map-prop-pick" data-prop-id="${escapeHtml(t.id)}">${t.icon} ${escapeHtml(t.namePl)}</button>`
+    ).join('');
+    showGenericModal('Postaw rekwizyt', `<div class="map-prop-picks">${rows}</div><p class="sheet-hint">Potem kliknij mapę.</p>`);
+    document.querySelectorAll('.map-prop-pick').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this._pendingPropTemplate = btn.dataset.propId;
+        closeModal('generic-modal');
+        this.setTool('prop-place');
+        const tpl = MapPropTemplates.get(this._pendingPropTemplate);
+        showToast(`Wybrano: ${tpl?.namePl || 'rekwizyt'} — kliknij mapę`, 'info');
+      });
+    });
+  },
+
+  placePropAt(cell) {
+    if (!this._pendingPropTemplate || !App.socket) return;
+    const token = MapProps.tokenFromTemplate(this._pendingPropTemplate, cell.x, cell.y);
+    if (!token) return;
+    App.socket.emit('map-add-token', {
+      entity_name: token.entity_name,
+      entity_type: 'object',
+      color: token.color,
+      x: token.x,
+      y: token.y,
+      size: token.size,
+      is_visible: true,
+      hp_max: token.hp_max,
+      hp_current: token.hp_current,
+      ac: token.ac,
+      stat_notes: token.stat_notes,
+      is_locked: true,
+      sync_initiative: false
+    });
+    this._pendingPropTemplate = null;
+    this.setTool('select');
+    showToast('Rekwizyt dodany na mapę', 'success');
   },
 
   async showLinkTokenDialog(token) {
@@ -1235,28 +1379,32 @@ const BattleMap = {
   },
 
   showTokenStatsDialog(token) {
+    const propHint = typeof MapProps !== 'undefined' ? MapProps.displayHint(token) : '';
+    const isProp = typeof MapProps !== 'undefined' && MapProps.getTemplateForToken(token);
     const html = `
       <form id="map-token-stats-form">
+        ${isProp ? `<p class="sheet-hint">${escapeHtml(propHint)}</p>` : ''}
         <div class="form-row">
           <div class="form-group"><label>HP (teraz)</label><input type="number" id="map-ts-hp" value="${token.hp_current || 0}" min="0"></div>
           <div class="form-group"><label>HP (max)</label><input type="number" id="map-ts-hpmax" value="${token.hp_max || 0}" min="0"></div>
         </div>
         <div class="form-group"><label>AC</label><input type="number" id="map-ts-ac" value="${token.ac || 0}" min="0"></div>
         <div class="form-group"><label>Prędkość (ft, 0 = z karty postaci)</label><input type="number" id="map-ts-speed" value="${token.speed_ft || 0}" min="0" step="5"></div>
-        <div class="form-group"><label>Notatki MG</label><textarea id="map-ts-notes" rows="3">${escapeHtml(token.stat_notes || '')}</textarea></div>
+        <div class="form-group"><label>Notatki MG</label><textarea id="map-ts-notes" rows="3" ${isProp ? 'readonly' : ''}>${escapeHtml(isProp ? propHint : (token.stat_notes || ''))}</textarea></div>
         <button type="submit" class="btn btn-primary btn-full">Zapisz</button>
       </form>
     `;
     showGenericModal(`Statystyki: ${escapeHtml(token.entity_name)}`, html);
     document.getElementById('map-token-stats-form').addEventListener('submit', (e) => {
       e.preventDefault();
+      const keepPropNotes = typeof MapProps !== 'undefined' && MapProps.parseNotes(token.stat_notes);
       App.socket?.emit('map-update-token', {
         id: token.id,
         hp_current: parseInt(document.getElementById('map-ts-hp').value, 10) || 0,
         hp_max: parseInt(document.getElementById('map-ts-hpmax').value, 10) || 0,
         ac: parseInt(document.getElementById('map-ts-ac').value, 10) || 0,
         speed_ft: parseInt(document.getElementById('map-ts-speed').value, 10) || 0,
-        stat_notes: document.getElementById('map-ts-notes').value.trim()
+        stat_notes: keepPropNotes ? token.stat_notes : document.getElementById('map-ts-notes').value.trim()
       });
       closeModal('generic-modal');
       showToast('Statystyki tokenu zapisane', 'success');

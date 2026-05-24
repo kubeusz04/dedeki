@@ -41,7 +41,10 @@ const MapCombat = {
     document.getElementById('map-btn-roll-spell')?.addEventListener('click', () => this.startSpellFromSidebar());
 
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') this.cancelTargeting();
+      if (e.key === 'Escape') {
+        this.cancelTargeting();
+        if (typeof MapZones !== 'undefined') MapZones.cancelPlacement();
+      }
     });
   },
 
@@ -354,6 +357,13 @@ const MapCombat = {
         const spell = spells.find((s) => s.id === btn.dataset.spellId);
         closeModal('generic-modal');
         if (!spell) return;
+        const area = DndSpells.parseAreaFromSpell(spell);
+        if (area.aoeShape && BattleMap.isDm()) {
+          closeModal('generic-modal');
+          MapZones.startSpellPlacement(spell, attackerToken.id);
+          this.cancelTargeting();
+          return;
+        }
         this.targeting = { mode: 'spell', attackerTokenId: attackerToken.id, spell, characterId: this.getCharacterForToken(attackerToken)?.id };
         showToast('Kliknij cel w zasięgu', 'info');
         BattleMap.render();
@@ -379,6 +389,32 @@ const MapCombat = {
       return;
     }
     this.startSpellTargeting(token);
+  },
+
+  startMapSpellAoe() {
+    const tokenId = this.getActiveTokenId();
+    const token = BattleMap.tokens.find((t) => t.id === tokenId);
+    if (!token) {
+      showToast('Wybierz aktywny token (inicjatywa)', 'warning');
+      return;
+    }
+    const char = this.getCharacterForToken(token);
+    let spells = [];
+    if (char && typeof DndSpells !== 'undefined') {
+      spells = DndSpells.parseSpellsKnown(char).filter((s) => {
+        const a = DndSpells.parseAreaFromSpell(s);
+        return a.aoeShape && (s.attackType === 'save' || s.damage);
+      });
+    }
+    if (!spells.length && typeof DndSpells !== 'undefined') {
+      spells = DndSpells.SPELL_TEMPLATES.filter((t) => t.aoeShape && t.attackType === 'save')
+        .map((t) => DndSpells.spellFromTemplate(t.id));
+    }
+    if (!spells.length) {
+      showToast('Brak czarów obszarowych', 'warning');
+      return;
+    }
+    this.showSpellPicker(spells, token);
   },
 
   cancelTargeting() {
@@ -602,7 +638,9 @@ const MapCombat = {
       const fromY = BattleMap.dragStartY;
       const toX = token.x;
       const toY = token.y;
-      const cost = MapTactics.cellsToFeet(MapTactics.chebyshevCells(fromX, fromY, toX, toY));
+      const cost = typeof MapZones !== 'undefined' && MapZones.zones?.length
+        ? MapZones.movementCostFt(fromX, fromY, toX, toY)
+        : MapTactics.cellsToFeet(MapTactics.chebyshevCells(fromX, fromY, toX, toY));
       const remaining = this.getRemainingMovementFt(token.id) ?? 0;
       ctx.fillStyle = cost > remaining ? 'rgba(166, 61, 47, 0.85)' : 'rgba(201, 162, 39, 0.9)';
       ctx.font = 'bold 12px Cinzel, serif';

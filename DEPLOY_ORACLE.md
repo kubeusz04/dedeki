@@ -1,4 +1,4 @@
-﻿# Dedeki — wdrożenie na Oracle Cloud Free Tier
+# Dedeki — wdrożenie na Oracle Cloud Free Tier
 
 Instrukcja krok po kroku: repozytorium GitHub → maszyna wirtualna Oracle (Always Free) → Docker → aplikacja dostępna z internetu.
 
@@ -25,15 +25,22 @@ Instrukcja krok po kroku: repozytorium GitHub → maszyna wirtualna Oracle (Alwa
 2. Nazwa np. `dedeki` — **bez** README (już jest w projekcie)
 3. Repozytorium **public** lub **private**
 
-### 2. Wgraj kod z folderu `dedeki-github`
+### 2. Synchronizuj kod i wgraj na GitHub
 
-W PowerShell (Windows), w folderze **dedeki-github**:
+Najpierw skopiuj najnowszy kod z folderu roboczego:
+
+```powershell
+cd C:\Users\Zawadzki\Desktop\dedeki-github
+powershell -ExecutionPolicy Bypass -File .\deploy\scripts\sync-from-dedeki.ps1
+```
+
+Potem commit i push (pełna ściąga: **[GITHUB_ORACLE.md](GITHUB_ORACLE.md)**):
 
 ```powershell
 cd C:\Users\Zawadzki\Desktop\dedeki-github
 git init
 git add .
-git commit --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" -m "Initial commit: Dedeki VTT + deploy Oracle"
+git commit -m "Roll 1 VTT + deploy Oracle"
 git branch -M main
 git remote add origin https://github.com/TWOJ_LOGIN/dedeki.git
 git push -u origin main

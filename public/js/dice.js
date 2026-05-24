@@ -1034,8 +1034,36 @@ const Dice = {
     });
   },
 
+  onLogEntry(entry) {
+    if (!entry) return;
+    let rolls = entry.individual_rolls;
+    if (typeof rolls === 'string') {
+      try { rolls = JSON.parse(rolls); } catch { rolls = []; }
+    }
+    this.addToLog({
+      username: entry.username || 'MG',
+      expression: entry.roll_expression || entry.expression || '',
+      rolls: rolls || [],
+      total: entry.total,
+      characterName: '',
+      timestamp: new Date().toISOString()
+    });
+  },
+
+  displayAoeResults(data) {
+    const spellName = data.zone?.spellMeta?.name || data.zone?.label || 'Obszar zaklęcia';
+    const parts = (data.results || []).map((r) => {
+      const saveNote = r.saved ? ' (ST — połowa)' : '';
+      return `${r.name}: ${r.damage}${saveNote}`;
+    });
+    const summary = parts.length ? parts.join(' · ') : 'Brak tokenów w obszarze';
+    showToast(`${spellName}: ${summary}`, 'info');
+    if (data.logEntry) this.onLogEntry(data.logEntry);
+  },
+
   addToLog(data) {
     const logContainer = document.getElementById('dice-log');
+    if (!logContainer) return;
     const entry = document.createElement('div');
     entry.className = 'dice-log-entry';
     entry.innerHTML = `

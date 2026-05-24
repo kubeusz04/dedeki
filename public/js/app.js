@@ -206,6 +206,19 @@ const App = {
       if (typeof MapCombat !== 'undefined') MapCombat.playAttackFx(data, false);
     });
     this.socket.on('map-update', (data) => BattleMap.updateMap(data));
+    this.socket.on('map-prop-triggered', (data) => {
+      const msg = data?.name ? `${data.icon || '📦'} ${data.name} — efekt na mapie!` : 'Rekwizyt aktywowany';
+      showToast(msg, 'info');
+      BattleMap.loadMap();
+    });
+
+    this.socket.on('combat-aoe-result', (data) => {
+      if (typeof MapZones !== 'undefined') MapZones.onAoeResolved(data);
+      BattleMap.loadMap();
+    });
+    this.socket.on('dice-log-entry', (entry) => {
+      if (typeof Dice !== 'undefined' && Dice.onLogEntry) Dice.onLogEntry(entry);
+    });
     this.socket.on('map-token-moved', (data) => BattleMap.moveToken(data));
     this.socket.on('map-pointer', (data) => BattleMap.showPointer(data));
 

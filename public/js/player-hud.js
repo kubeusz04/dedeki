@@ -76,10 +76,9 @@ const PlayerHud = {
           </div>
           ${canEdit ? `
           <div class="hud-hp-actions">
-            <button type="button" class="hud-btn-sm" data-hud-action="hp" data-delta="-5">−5</button>
-            <button type="button" class="hud-btn-sm" data-hud-action="hp" data-delta="-1">−1</button>
-            <button type="button" class="hud-btn-sm" data-hud-action="hp" data-delta="1">+1</button>
-            <button type="button" class="hud-btn-sm" data-hud-action="hp" data-delta="5">+5</button>
+            <input type="number" class="hud-hp-input hp-delta-input" min="1" placeholder="HP" title="Ilość HP">
+            <button type="button" class="hud-btn-sm hud-btn-danger" data-hud-action="hp-damage">Odejmij</button>
+            <button type="button" class="hud-btn-sm hud-btn-heal" data-hud-action="hp-heal">Dodaj</button>
           </div>` : ''}
         </div>
 
@@ -146,13 +145,14 @@ const PlayerHud = {
 
     const action = btn.dataset.hudAction;
 
-    if (action === 'hp' && this.canEdit(c)) {
-      const delta = parseInt(btn.dataset.delta, 10);
-      await Characters.quickHp(c.id, delta);
-      const updated = await apiFetch(`/characters/${c.id}`);
-      if (Characters.activeCharacter?.id === c.id) Characters.activeCharacter = updated;
-      if (Characters.myCampaignCharacter?.id === c.id) Characters.myCampaignCharacter = updated;
-      this.render();
+    if ((action === 'hp-damage' || action === 'hp-heal') && this.canEdit(c)) {
+      const hud = document.getElementById('player-hud');
+      const amount = Characters.readHpAmountInput(hud);
+      if (amount == null) return;
+      const delta = action === 'hp-damage' ? -amount : amount;
+      await Characters.applyHpDelta(c.id, delta);
+      const input = hud?.querySelector('.hp-delta-input');
+      if (input) input.value = '';
       return;
     }
 

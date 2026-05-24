@@ -75,7 +75,10 @@ const DndSpells = {
       duration: t.duration,
       concentration: !!t.concentration,
       ritual: !!t.ritual,
-      description: t.description || ''
+      description: t.description || '',
+      aoeShape: t.aoeShape || null,
+      aoeSizeFt: t.aoeSizeFt || 0,
+      aoeWidthFt: t.aoeWidthFt || 5
     };
   },
 
@@ -93,16 +96,67 @@ const DndSpells = {
 
   normalizeSpell(raw) {
     if (!raw) return null;
+    let spell;
     if (typeof raw === 'string') {
       const byName = this.SPELL_TEMPLATES.find((s) => s.namePl === raw || s.id === raw);
-      if (byName) return this.spellFromTemplate(byName.id);
-      return { id: `sp-custom`, name: raw, level: 0, attackType: 'none' };
-    }
-    if (raw.templateId) {
+      if (byName) spell = this.spellFromTemplate(byName.id);
+      else spell = { id: 'sp-custom', name: raw, level: 0, attackType: 'none' };
+    } else if (raw.templateId) {
       const t = this.getTemplate(raw.templateId);
-      return { ...t, ...raw, name: raw.name || t?.namePl || 'Czar' };
+      spell = { ...t, ...raw, name: raw.name || t?.namePl || 'Czar', namePl: raw.namePl || t?.namePl };
+    } else {
+      spell = raw;
     }
-    return raw;
+    if (spell && !spell.aoeShape) {
+      const area = this.parseAreaFromSpell(spell);
+      Object.assign(spell, area);
+    }
+    return spell;
+  },
+
+  parseAreaFromSpell(spell) {
+    if (!spell) return { aoeShape: null, aoeSizeFt: 0, aoeWidthFt: 5 };
+    if (spell.aoeShape) {
+      return {
+        aoeShape: spell.aoeShape,
+        aoeSizeFt: spell.aoeSizeFt || 0,
+        aoeWidthFt: spell.aoeWidthFt || 5
+      };
+    }
+    const tpl = spell.templateId ? this.getTemplate(spell.templateId) : null;
+    const base = tpl || spell;
+    if (base.aoeShape) {
+      return {
+        aoeShape: base.aoeShape,
+        aoeSizeFt: base.aoeSizeFt || 0,
+        aoeWidthFt: base.aoeWidthFt || 5
+      };
+    }
+    const desc = `${base.description || ''} ${base.range || ''}`.toLowerCase();
+    const mFt = desc.match(/(\d+)\s*(?:ft|stóp|stop)/i) || desc.match(/(\d+)\s*m\b/i);
+    const mM = desc.match(/(\d+)\s*m\b/i);
+    let sizeFt = 0;
+    if (mFt) sizeFt = parseInt(mFt[1], 10) * (String(mFt[0]).includes('m') && !String(mFt[0]).includes('ft') ? 3.28 : 1);
+    if (mM && !sizeFt) sizeFt = Math.round(parseInt(mM[1], 10) * 3.28);
+
+    if (/stożek|cone/i.test(desc)) {
+      return { aoeShape: 'cone', aoeSizeFt: sizeFt || 60, aoeWidthFt: 5 };
+    }
+    if (/sfer|sphere|promień|radius/i.test(desc)) {
+      const r = desc.match(/(\d+)\s*m\b/);
+      const ft = r ? Math.round(parseInt(r[1], 10) * 3.28) : (sizeFt || 20);
+      return { aoeShape: 'sphere', aoeSizeFt: ft, aoeWidthFt: 5 };
+    }
+    if (/sześcian|cube|kwadrat/i.test(desc)) {
+      return { aoeShape: 'cube', aoeSizeFt: sizeFt || 20, aoeWidthFt: 5 };
+    }
+    if (/linia|line/i.test(desc) || /\(linia\)/i.test(spell.range || '')) {
+      return { aoeShape: 'line', aoeSizeFt: sizeFt || 100, aoeWidthFt: 5 };
+    }
+    if (/ty\s*\(|^ty$/i.test((spell.range || '').trim()) && /stożek/i.test(spell.range || '')) {
+      return { aoeShape: 'cone', aoeSizeFt: 15, aoeWidthFt: 5 };
+    }
+    return { aoeShape: null, aoeSizeFt: 0, aoeWidthFt: 5 };
   },
 
   parseSpellsKnown(char) {
@@ -132,14 +186,14 @@ const DndSpells = {
     // 1st
     { id: 'magic-missile', namePl: 'Magiczny pocisk', level: 1, school: 'evocation', classes: ['Wizard', 'Sorcerer'], attackType: 'none', damage: '3d4+3', damageType: 'force', castingTime: '1 akcja', range: '36 m', duration: 'Natychmiast', description: '3 pociski trafiają automatycznie.' },
     { id: 'shield', namePl: 'Tarcza', level: 1, school: 'abjuration', classes: ['Wizard', 'Sorcerer'], attackType: 'none', castingTime: '1 reakcja', range: 'Ty', duration: '1 runda', description: '+5 KP do następnego ataku.' },
-    { id: 'burning-hands', namePl: 'Płonące dłonie', level: 1, school: 'evocation', classes: ['Wizard', 'Sorcerer'], attackType: 'save', saveAbility: 'dexterity', damage: '3d6', damageType: 'fire', castingTime: '1 akcja', range: 'Ty (stożek)', duration: 'Natychmiast', description: 'Stożek ognia 4,5 m.' },
+    { id: 'burning-hands', namePl: 'Płonące dłonie', level: 1, school: 'evocation', classes: ['Wizard', 'Sorcerer'], attackType: 'save', saveAbility: 'dexterity', damage: '3d6', damageType: 'fire', castingTime: '1 akcja', range: 'Ty (stożek)', duration: 'Natychmiast', description: 'Stożek ognia 4,5 m.', aoeShape: 'cone', aoeSizeFt: 15 },
     { id: 'cure-wounds', namePl: 'Leczenie ran', level: 1, school: 'evocation', classes: ['Cleric', 'Druid', 'Bard', 'Paladin', 'Ranger', 'Artificer'], attackType: 'heal', healing: '1d8', castingTime: '1 akcja', range: 'Dotyk', duration: 'Natychmiast', description: 'Leczenie + modyfikator rzucania.' },
     { id: 'healing-word', namePl: 'Słowo leczenia', level: 1, school: 'evocation', classes: ['Cleric', 'Druid', 'Bard'], attackType: 'heal', healing: '1d4', castingTime: '1 akcja dodatkowa', range: '18 m', duration: 'Natychmiast', description: 'Szybkie leczenie na dystans.' },
     { id: 'bless', namePl: 'Błogosławieństwo', level: 1, school: 'enchantment', classes: ['Cleric', 'Paladin'], attackType: 'none', castingTime: '1 akcja', range: '9 m', duration: 'Koncentracja, do 1 min', concentration: true, description: '+1k4 do ataków i rzutów obronnych.' },
     { id: 'guiding-bolt', namePl: 'Pocisk prowadzący', level: 1, school: 'evocation', classes: ['Cleric'], attackType: 'attack', damage: '4d6', damageType: 'radiant', castingTime: '1 akcja', range: '36 m', duration: 'Natychmiast', description: 'Przewaga na następny atak.' },
     { id: 'hex', namePl: 'Klątwa', level: 1, school: 'enchantment', classes: ['Warlock'], attackType: 'none', castingTime: '1 akcja dodatkowa', range: '27 m', duration: 'Koncentracja, do 1 h', concentration: true, description: '+1d6 nekrotycznych przy trafieniu.' },
     { id: 'hunters-mark', namePl: 'Znak łowcy', level: 1, school: 'divination', classes: ['Ranger'], attackType: 'none', castingTime: '1 akcja dodatkowa', range: '27 m', duration: 'Koncentracja, do 1 h', concentration: true, description: '+1d6 obrażeń na celu.' },
-    { id: 'thunderwave', namePl: 'Fala grzmotu', level: 1, school: 'evocation', classes: ['Wizard', 'Sorcerer', 'Bard', 'Druid'], attackType: 'save', saveAbility: 'constitution', damage: '2d8', damageType: 'thunder', castingTime: '1 akcja', range: 'Ty', duration: 'Natychmiast', description: 'Obuch + odepchnięcie.' },
+    { id: 'thunderwave', namePl: 'Fala grzmotu', level: 1, school: 'evocation', classes: ['Wizard', 'Sorcerer', 'Bard', 'Druid'], attackType: 'save', saveAbility: 'constitution', damage: '2d8', damageType: 'thunder', castingTime: '1 akcja', range: 'Ty', duration: 'Natychmiast', description: 'Obuch + odepchnięcie.', aoeShape: 'cube', aoeSizeFt: 15 },
     { id: 'sleep', namePl: 'Sen', level: 1, school: 'enchantment', classes: ['Wizard', 'Sorcerer', 'Bard'], attackType: 'none', castingTime: '1 akcja', range: '27 m', duration: '1 min', description: '5d8 PW — usypia stwory.' },
     { id: 'detect-magic', namePl: 'Wykrycie magii', level: 1, school: 'divination', classes: ['Wizard', 'Cleric', 'Druid', 'Bard', 'Paladin', 'Ranger', 'Artificer'], attackType: 'none', ritual: true, castingTime: '1 akcja', range: 'Ty', duration: 'Koncentracja, 10 min', concentration: true, description: 'Wyczuwanie aur magicznych.' },
     { id: 'identify', namePl: 'Identyfikacja', level: 1, school: 'divination', classes: ['Wizard', 'Bard', 'Artificer'], attackType: 'none', ritual: true, castingTime: '1 min', range: 'Dotyk', duration: 'Natychmiast', description: 'Właściwości magicznego przedmiotu.' },
@@ -157,15 +211,15 @@ const DndSpells = {
     { id: 'prayer-of-healing', namePl: 'Modlitwa leczenia', level: 2, school: 'evocation', classes: ['Cleric'], attackType: 'heal', healing: '2d8', castingTime: '10 min', range: '9 m', duration: 'Natychmiast', description: 'Do 6 celów + mod.' },
     { id: 'lesser-restoration', namePl: 'Mniejsze przywrócenie', level: 2, school: 'abjuration', classes: ['Cleric', 'Druid', 'Paladin', 'Ranger', 'Bard', 'Artificer'], attackType: 'none', castingTime: '1 akcja', range: 'Dotyk', duration: 'Natychmiast', description: 'Usuwa chorobę lub stan.' },
     { id: 'invisibility', namePl: 'Niewidzialność', level: 2, school: 'illusion', classes: ['Wizard', 'Sorcerer', 'Bard', 'Warlock', 'Artificer'], attackType: 'none', castingTime: '1 akcja', range: 'Dotyk', duration: 'Koncentracja, 1 h', concentration: true, description: 'Niewidzialność do ataku.' },
-    { id: 'shatter', namePl: 'Rozbicie', level: 2, school: 'evocation', classes: ['Wizard', 'Sorcerer', 'Bard', 'Warlock'], attackType: 'save', saveAbility: 'constitution', damage: '3d8', damageType: 'thunder', castingTime: '1 akcja', range: '18 m', duration: 'Natychmiast', description: 'Sfera 3 m — dźwięk.' },
+    { id: 'shatter', namePl: 'Rozbicie', level: 2, school: 'evocation', classes: ['Wizard', 'Sorcerer', 'Bard', 'Warlock'], attackType: 'save', saveAbility: 'constitution', damage: '3d8', damageType: 'thunder', castingTime: '1 akcja', range: '18 m', duration: 'Natychmiast', description: 'Sfera 3 m — dźwięk.', aoeShape: 'sphere', aoeSizeFt: 10 },
     { id: 'spike-growth', namePl: 'Kolczaste zarośla', level: 2, school: 'transmutation', classes: ['Druid', 'Ranger'], attackType: 'none', castingTime: '1 akcja', range: '45 m', duration: 'Koncentracja, 10 min', concentration: true, description: '2d4 kolce za każde 1,5 m ruchu.' },
     { id: 'moonbeam', namePl: 'Promień księżyca', level: 2, school: 'evocation', classes: ['Druid'], attackType: 'save', saveAbility: 'constitution', damage: '2d10', damageType: 'radiant', castingTime: '1 akcja', range: '36 m', duration: 'Koncentracja, 1 min', concentration: true, description: 'Cylinder światła.' },
     { id: 'aid', namePl: 'Wspomożenie', level: 2, school: 'abjuration', classes: ['Cleric', 'Paladin', 'Artificer'], attackType: 'none', castingTime: '1 akcja', range: '9 m', duration: '8 h', description: '+5 max HP do 3 celów.' },
     { id: 'heat-metal', namePl: 'Rozgrzany metal', level: 2, school: 'transmutation', classes: ['Druid', 'Bard', 'Artificer'], attackType: 'save', saveAbility: 'constitution', damage: '2d8', damageType: 'fire', castingTime: '1 akcja', range: '18 m', duration: 'Koncentracja, 1 min', concentration: true, description: 'Podgrzewa metal.' },
 
     // 3rd
-    { id: 'fireball', namePl: 'Kula ognia', level: 3, school: 'evocation', classes: ['Wizard', 'Sorcerer', 'Warlock'], attackType: 'save', saveAbility: 'dexterity', damage: '8d6', damageType: 'fire', castingTime: '1 akcja', range: '45 m', duration: 'Natychmiast', description: 'Sfera 6 m — połowa obrażeń przy ST.' },
-    { id: 'lightning-bolt', namePl: 'Piorun', level: 3, school: 'evocation', classes: ['Wizard', 'Sorcerer'], attackType: 'save', saveAbility: 'dexterity', damage: '8d6', damageType: 'lightning', castingTime: '1 akcja', range: 'Ty (linia)', duration: 'Natychmiast', description: 'Linia 30 m.' },
+    { id: 'fireball', namePl: 'Kula ognia', level: 3, school: 'evocation', classes: ['Wizard', 'Sorcerer', 'Warlock'], attackType: 'save', saveAbility: 'dexterity', damage: '8d6', damageType: 'fire', castingTime: '1 akcja', range: '45 m', duration: 'Natychmiast', description: 'Sfera 6 m — połowa obrażeń przy ST.', aoeShape: 'sphere', aoeSizeFt: 20 },
+    { id: 'lightning-bolt', namePl: 'Piorun', level: 3, school: 'evocation', classes: ['Wizard', 'Sorcerer'], attackType: 'save', saveAbility: 'dexterity', damage: '8d6', damageType: 'lightning', castingTime: '1 akcja', range: 'Ty (linia)', duration: 'Natychmiast', description: 'Linia 30 m.', aoeShape: 'line', aoeSizeFt: 100, aoeWidthFt: 5 },
     { id: 'counterspell', namePl: 'Kontrzaklęcie', level: 3, school: 'abjuration', classes: ['Wizard', 'Sorcerer', 'Warlock', 'Bard'], attackType: 'none', castingTime: '1 reakcja', range: '18 m', duration: 'Natychmiast', description: 'Przerywa rzucanie czaru.' },
     { id: 'revivify', namePl: 'Ożywienie', level: 3, school: 'necromancy', classes: ['Cleric', 'Paladin', 'Druid', 'Ranger', 'Bard', 'Artificer'], attackType: 'none', castingTime: '1 akcja', range: 'Dotyk', duration: 'Natychmiast', description: 'Wskrzeszenie w ciągu 1 minuty.' },
     { id: 'spirit-guardians', namePl: 'Duchowi strażnicy', level: 3, school: 'conjuration', classes: ['Cleric'], attackType: 'save', saveAbility: 'wisdom', damage: '3d8', damageType: 'radiant', castingTime: '1 akcja', range: 'Ty', duration: 'Koncentracja, 10 min', concentration: true, description: 'Aura 4,5 m — wrogi ST lub obrażenia.' },
@@ -183,12 +237,12 @@ const DndSpells = {
     { id: 'greater-invisibility', namePl: 'Większa niewidzialność', level: 4, school: 'illusion', classes: ['Wizard', 'Sorcerer', 'Bard', 'Artificer'], attackType: 'none', castingTime: '1 akcja', range: 'Dotyk', duration: 'Koncentracja, 1 min', concentration: true, description: 'Niewidzialność nawet po ataku.' },
     { id: 'wall-of-fire', namePl: 'Ściana ognia', level: 4, school: 'evocation', classes: ['Wizard', 'Druid', 'Sorcerer', 'Warlock'], attackType: 'save', saveAbility: 'dexterity', damage: '5d8', damageType: 'fire', castingTime: '1 akcja', range: '36 m', duration: 'Koncentracja, 1 min', concentration: true, description: 'Ściana płomieni.' },
     { id: 'guardian-of-faith', namePl: 'Strażnik wiary', level: 4, school: 'conjuration', classes: ['Cleric'], attackType: 'save', saveAbility: 'dexterity', damage: '20', damageType: 'radiant', castingTime: '1 akcja', range: '9 m', duration: '8 h', description: 'Duch zadaje obrażenia przy wejściu.' },
-    { id: 'ice-storm', namePl: 'Burza lodowa', level: 4, school: 'evocation', classes: ['Wizard', 'Druid', 'Sorcerer'], attackType: 'save', saveAbility: 'dexterity', damage: '2d8', damageType: 'bludgeoning', castingTime: '1 akcja', range: '90 m', duration: 'Natychmiast', description: '+ 4d6 zimno w obszarze.' },
+    { id: 'ice-storm', namePl: 'Burza lodowa', level: 4, school: 'evocation', classes: ['Wizard', 'Druid', 'Sorcerer'], attackType: 'save', saveAbility: 'dexterity', damage: '2d8', damageType: 'bludgeoning', castingTime: '1 akcja', range: '90 m', duration: 'Natychmiast', description: '+ 4d6 zimno w obszarze.', aoeShape: 'cube', aoeSizeFt: 40 },
     { id: 'freedom-of-movement', namePl: 'Wolność ruchów', level: 4, school: 'abjuration', classes: ['Cleric', 'Druid', 'Bard', 'Ranger', 'Artificer'], attackType: 'none', castingTime: '1 akcja', range: 'Dotyk', duration: '1 h', description: 'Immunitet na spowolnienie i chwyt.' },
 
     // 5th
     { id: 'hold-monster', namePl: 'Unieruchomienie potwora', level: 5, school: 'enchantment', classes: ['Wizard', 'Sorcerer', 'Bard', 'Warlock'], attackType: 'save', saveAbility: 'wisdom', castingTime: '1 akcja', range: '27 m', duration: 'Koncentracja, 1 min', concentration: true, description: 'Paraliż stwora.' },
-    { id: 'cone-of-cold', namePl: 'Stożek zimna', level: 5, school: 'evocation', classes: ['Wizard', 'Sorcerer', 'Druid'], attackType: 'save', saveAbility: 'constitution', damage: '8d8', damageType: 'cold', castingTime: '1 akcja', range: 'Ty', duration: 'Natychmiast', description: 'Stożek 18 m.' },
+    { id: 'cone-of-cold', namePl: 'Stożek zimna', level: 5, school: 'evocation', classes: ['Wizard', 'Sorcerer', 'Druid'], attackType: 'save', saveAbility: 'constitution', damage: '8d8', damageType: 'cold', castingTime: '1 akcja', range: 'Ty', duration: 'Natychmiast', description: 'Stożek 18 m.', aoeShape: 'cone', aoeSizeFt: 60 },
     { id: 'flame-strike', namePl: 'Uderzenie płomieni', level: 5, school: 'evocation', classes: ['Cleric'], attackType: 'save', saveAbility: 'dexterity', damage: '4d6', damageType: 'fire', castingTime: '1 akcja', range: '18 m', duration: 'Natychmiast', description: '+ 4d6 światło od nieba.' },
     { id: 'raise-dead', namePl: 'Wskrzeszenie', level: 5, school: 'necromancy', classes: ['Cleric', 'Bard', 'Paladin'], attackType: 'none', castingTime: '1 h', range: 'Dotyk', duration: 'Natychmiast', description: 'Wskrzeszenie po dniach.' },
     { id: 'mass-cure-wounds', namePl: 'Masowe leczenie ran', level: 5, school: 'evocation', classes: ['Cleric', 'Druid', 'Bard'], attackType: 'heal', healing: '3d8', castingTime: '1 akcja', range: '18 m', duration: 'Natychmiast', description: 'Do 6 celów w promieniu 9 m.' },

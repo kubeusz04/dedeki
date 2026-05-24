@@ -309,27 +309,24 @@ function handleCharacterImageDelete(field) {
 // Middleware
 const isProduction = process.env.NODE_ENV === 'production';
 const useHttps = process.env.USE_HTTPS === 'true';
-const cspDirectives = {
-  defaultSrc: ["'self'"],
-  scriptSrc: ["'self'", "'unsafe-inline'"],
-  scriptSrcAttr: ["'unsafe-inline'", "'unsafe-hashes'"],
-  styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-  styleSrcAttr: ["'unsafe-inline'", "'unsafe-hashes'"],
-  fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
-  imgSrc: ["'self'", 'data:', 'blob:'],
-  connectSrc: ["'self'", 'ws:', 'wss:']
-};
-if (useHttps) cspDirectives.upgradeInsecureRequests = [];
-
 app.use(helmet({
   hsts: useHttps,
   crossOriginOpenerPolicy: useHttps,
-  crossOriginEmbedderPolicy: useHttps,
   originAgentCluster: useHttps,
   crossOriginResourcePolicy: useHttps ? { policy: 'cross-origin' } : false,
   contentSecurityPolicy: {
-    useDefaults: false,
-    directives: cspDirectives
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      // Dynamic HTML uses onclick/onchange (character sheet, map, initiative)
+      scriptSrcAttr: ["'unsafe-inline'", "'unsafe-hashes'"],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      styleSrcAttr: ["'unsafe-inline'", "'unsafe-hashes'"],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+      imgSrc: ["'self'", 'data:', 'blob:'],
+      connectSrc: ["'self'", 'ws:', 'wss:'],
+      upgradeInsecureRequests: useHttps ? [] : null
+    }
   }
 }));
 app.use(express.json({ limit: '5mb' }));
@@ -1666,11 +1663,18 @@ io.on('connection', (socket) => {
         socket.emit('combat-error', { message: 'Brak uprawnień do zadania obrażeń' });
         return;
       }
-      const result = await combatOps.applyDamageToToken(data.targetTokenId, data.amount);
+      const result = await combatOps.applyDamageToToken(
+        data.targetTokenId,
+        data.amount,
+        socket.campaignId
+      );
       const payload = await buildMapPayload(socket.campaignId);
       io.to(socket.campaignId).emit('map-update', payload);
       await broadcastCombatUpdate(socket.campaignId);
       socket.emit('combat-damage-applied', result);
+      if (result?.prop?.ok) {
+        io.to(socket.campaignId).emit('map-prop-triggered', result.prop);
+      }
     } catch (err) {
       console.error('combat-apply-damage', err);
     }
@@ -1719,6 +1723,63 @@ io.on('connection', (socket) => {
       io.to(socket.campaignId).emit('map-update', payload);
     } catch (err) {
       console.error('map-update-blocking', err);
+    }
+  });
+
+  socket.on('map-update-zones', async (data) => {
+    if (!socket.campaignId || socket.userRole !== 'dm') return;
+    try {
+      await combatOps.updateZones(socket.campaignId, data.zones || []);
+      const payload = await buildMapPayload(socket.campaignId);
+      io.to(socket.campaignId).emit('map-update', payload);
+    } catch (err) {
+      console.error('map-update-zones', err);
+    }
+  });
+
+  socket.on('map-trigger-prop', async (data) => {
+    if (!socket.campaignId || socket.userRole !== 'dm') return;
+    try {
+      const result = await combatOps.resolvePropTrigger(
+        socket.campaignId,
+        data.tokenId,
+        'manual'
+      );
+      if (!result.ok) {
+        socket.emit('combat-error', { message: 'Nie można aktywować rekwizytu' });
+        return;
+      }
+      const payload = await buildMapPayload(socket.campaignId);
+      io.to(socket.campaignId).emit('map-update', payload);
+      io.to(socket.campaignId).emit('map-prop-triggered', result);
+    } catch (err) {
+      console.error('map-trigger-prop', err);
+    }
+  });
+
+  socket.on('combat-aoe-resolve', async (data) => {
+    if (!socket.campaignId || socket.userRole !== 'dm') return;
+    try {
+      const result = await combatOps.resolveAoeSpell(
+        socket.campaignId,
+        socket.user.id,
+        socket.user.display_name || socket.user.username,
+        data
+      );
+      if (!result.ok) {
+        socket.emit('combat-error', { message: result.reason || 'Nie udało się rozstrzygnąć AoE' });
+        return;
+      }
+      const payload = await buildMapPayload(socket.campaignId);
+      io.to(socket.campaignId).emit('map-update', payload);
+      io.to(socket.campaignId).emit('combat-aoe-result', result);
+      if (result.logEntry) {
+        io.to(socket.campaignId).emit('dice-log-entry', result.logEntry);
+      }
+      await broadcastCombatUpdate(socket.campaignId);
+    } catch (err) {
+      console.error('combat-aoe-resolve', err);
+      socket.emit('combat-error', { message: err.message });
     }
   });
 

@@ -3,6 +3,8 @@ require('dotenv').config();
 const { Pool } = require('pg');
 const { v4: uuidv4 } = require('uuid');
 const MapTactics = require('./public/js/map-tactics.js');
+const MapPropTemplates = require('./public/js/map-prop-templates.js');
+const MapProps = require('./public/js/map-props.js');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -366,6 +368,8 @@ async function runMigrations() {
     'ALTER TABLE map_settings ADD COLUMN IF NOT EXISTS combat_state TEXT DEFAULT \'{}\'',
     'ALTER TABLE map_settings ADD COLUMN IF NOT EXISTS map_blocking TEXT DEFAULT \'[]\'',
     'ALTER TABLE map_settings ADD COLUMN IF NOT EXISTS los_fog_blocks INTEGER DEFAULT 1',
+    'ALTER TABLE map_settings ADD COLUMN IF NOT EXISTS grid_opacity INTEGER DEFAULT 100',
+    'ALTER TABLE map_settings ADD COLUMN IF NOT EXISTS map_zones TEXT DEFAULT \'[]\'',
     `CREATE TABLE IF NOT EXISTS map_pins (
       id TEXT PRIMARY KEY,
       campaign_id TEXT NOT NULL,
@@ -1378,9 +1382,9 @@ const mapOps = {
 
   async updateSettings(campaignId, data) {
     const allowedFields = [
-      'grid_size', 'grid_width', 'grid_height', 'background_color', 'background_image',
+      'grid_size', 'grid_width', 'grid_height', 'grid_opacity', 'background_color', 'background_image',
       'fog_enabled', 'fog_revealed', 'last_token_move', 'movement_trails', 'trails_enabled',
-      'combat_state', 'map_blocking', 'los_fog_blocks'
+      'combat_state', 'map_blocking', 'map_zones', 'los_fog_blocks'
     ];
     const used = pickDefined(data, allowedFields);
     if (used.includes('fog_enabled')) {
@@ -1391,6 +1395,10 @@ const mapOps = {
     }
     if (used.includes('los_fog_blocks')) {
       data.los_fog_blocks = data.los_fog_blocks ? 1 : 0;
+    }
+    if (used.includes('grid_opacity')) {
+      const n = parseInt(data.grid_opacity, 10);
+      data.grid_opacity = Math.max(0, Math.min(100, Number.isNaN(n) ? 100 : n));
     }
     if (used.length === 0) return this.getSettings(campaignId);
 
@@ -1419,9 +1427,11 @@ const mapOps = {
         grid_size: settings?.grid_size ?? 40,
         grid_width: settings?.grid_width ?? 25,
         grid_height: settings?.grid_height ?? 18,
+        grid_opacity: settings?.grid_opacity ?? 100,
         background_color: settings?.background_color || '#3b2618',
         background_image: settings?.background_image || '',
         map_blocking,
+        map_zones: MapTactics.parseZonesList(settings?.map_zones || '[]'),
         fog_enabled: !!settings?.fog_enabled,
         los_fog_blocks: settings?.los_fog_blocks !== 0
       },
@@ -1488,9 +1498,11 @@ const mapOps = {
       grid_size: s.grid_size ?? 40,
       grid_width: s.grid_width ?? 25,
       grid_height: s.grid_height ?? 18,
+      grid_opacity: s.grid_opacity ?? 100,
       background_color: s.background_color || '#3b2618',
       background_image: s.background_image || '',
       map_blocking: JSON.stringify(s.map_blocking || []),
+      map_zones: JSON.stringify(s.map_zones || []),
       fog_enabled: s.fog_enabled ? 1 : 0,
       los_fog_blocks: s.los_fog_blocks === false ? 0 : 1,
       fog_revealed: resetFog ? '[]' : undefined,
@@ -1735,8 +1747,9 @@ const combatOps = {
       return { ok: true, skipCombat: true };
     }
 
-    const distCells = MapTactics.chebyshevCells(token.x, token.y, newX, newY);
-    const costFt = MapTactics.cellsToFeet(distCells);
+    const zones = MapTactics.parseZonesList(settings?.map_zones || '[]');
+    const terrainIndex = MapTactics.buildTerrainIndex(zones);
+    const costFt = MapTactics.movementCostAlongPath(token.x, token.y, newX, newY, terrainIndex);
     const remaining = (turnState?.movementRemainingFt ?? 0) + (turnState?.dashBonusFt ?? 0);
 
     if (costFt > remaining) {
@@ -1889,7 +1902,7 @@ const combatOps = {
     return { ok: true, attacker, target, rangeCheck, state, turn };
   },
 
-  async applyDamageToToken(tokenId, amount) {
+  async applyDamageToToken(tokenId, amount, campaignId = null) {
     const token = await mapOps.getTokenById(tokenId);
     if (!token) return null;
 
@@ -1905,7 +1918,8 @@ const combatOps = {
     }
 
     const dmg = Math.max(0, parseInt(amount, 10) || 0);
-    const next = Math.max(0, (hpCurrent ?? 0) - dmg);
+    const prevHp = hpCurrent ?? 0;
+    const next = Math.max(0, prevHp - dmg);
 
     await mapOps.updateToken(tokenId, {
       hp_current: next,
@@ -1919,13 +1933,222 @@ const combatOps = {
       );
     }
 
-    return { tokenId, hpCurrent: next, hpMax, damage: dmg };
+    let prop = null;
+    const cid = campaignId || token.campaign_id;
+    if (cid && dmg > 0) {
+      if (next <= 0 && prevHp > 0) {
+        prop = await this.resolvePropTrigger(cid, tokenId, 'on_destroy');
+      } else if (next > 0) {
+        prop = await this.resolvePropTrigger(cid, tokenId, 'on_hit');
+      }
+    }
+
+    return { tokenId, hpCurrent: next, hpMax, damage: dmg, prop };
+  },
+
+  async resolvePropTrigger(campaignId, tokenId, eventType) {
+    const token = await mapOps.getTokenById(tokenId);
+    if (!token || token.campaign_id !== campaignId) return { ok: false, reason: 'no_token' };
+
+    const meta = MapProps.parseNotes(token.stat_notes);
+    if (!meta || meta.triggered) return { ok: false, reason: 'no_prop' };
+
+    const tpl = MapPropTemplates.get(meta.templateId);
+    if (!tpl || tpl.trigger === 'none') return { ok: false, reason: 'no_effect' };
+
+    const match =
+      eventType === 'manual' ||
+      (eventType === 'on_destroy' && tpl.trigger === 'on_destroy') ||
+      (eventType === 'on_hit' && tpl.trigger === 'on_hit');
+    if (!match) return { ok: false, reason: 'wrong_trigger' };
+
+    const settings = await mapOps.getSettings(campaignId);
+    const gw = settings?.grid_width || 25;
+    const gh = settings?.grid_height || 18;
+
+    if (tpl.effects?.length) {
+      const newZones = MapProps.buildZonesFromEffects(tpl.effects, token, gw, gh);
+      if (newZones.length) {
+        const zones = MapTactics.parseZonesList(settings?.map_zones || '[]');
+        zones.push(...newZones);
+        await this.updateZones(campaignId, zones);
+      }
+      const blockCells = MapProps.buildBlockingFromEffects(tpl.effects, token);
+      if (blockCells.length) {
+        const blocking = this.parseBlocking(settings);
+        blockCells.forEach((c) => blocking.add(c));
+        await this.updateBlocking(campaignId, MapTactics.blockingToArray(blocking));
+      }
+    }
+
+    const removeOnTrigger = tpl.removeOnTrigger ?? (tpl.trigger === 'on_destroy' || eventType === 'on_destroy');
+    if (removeOnTrigger) {
+      await mapOps.removeToken(tokenId);
+    } else {
+      await mapOps.updateToken(tokenId, {
+        stat_notes: MapProps.encodeNotes(meta.templateId, { triggered: true })
+      });
+    }
+
+    return {
+      ok: true,
+      templateId: tpl.id,
+      name: tpl.namePl,
+      icon: tpl.icon,
+      eventType
+    };
   },
 
   async updateBlocking(campaignId, cells) {
     const arr = Array.isArray(cells) ? cells : [];
     await mapOps.updateSettings(campaignId, { map_blocking: JSON.stringify(arr) });
     return arr;
+  },
+
+  async updateZones(campaignId, zones) {
+    const arr = Array.isArray(zones) ? zones : [];
+    await mapOps.updateSettings(campaignId, { map_zones: MapTactics.zonesToJson(arr) });
+    return arr;
+  },
+
+  _rollDie(sides) {
+    return Math.floor(Math.random() * sides) + 1;
+  },
+
+  _rollDamageExpr(expr) {
+    const match = String(expr || '').match(/(\d+)d(\d+)/i);
+    if (!match) {
+      const flat = parseInt(expr, 10);
+      if (!Number.isNaN(flat)) return { rolls: [flat], total: flat };
+      return { rolls: [], total: 0 };
+    }
+    const count = parseInt(match[1], 10);
+    const sides = parseInt(match[2], 10);
+    const rolls = [];
+    let total = 0;
+    for (let i = 0; i < count; i++) {
+      const r = this._rollDie(sides);
+      rolls.push(r);
+      total += r;
+    }
+    return { rolls, total };
+  },
+
+  _abilityMod(score) {
+    return Math.floor(((parseInt(score, 10) || 10) - 10) / 2);
+  },
+
+  async _getTokenSaveMod(token, ability) {
+    if (!ability || !token?.entity_id) return 0;
+    if (token.entity_type === 'player') {
+      const char = await characterOps.findById(token.entity_id);
+      if (char) return this._abilityMod(char[ability]);
+    }
+    if (token.entity_type === 'npc' || token.entity_type === 'monster') {
+      const npc = await npcOps.findById(token.entity_id);
+      if (npc?.stats) {
+        try {
+          const stats = JSON.parse(npc.stats);
+          if (stats[ability] != null) return this._abilityMod(stats[ability]);
+          if (stats.abilities?.[ability] != null) return this._abilityMod(stats.abilities[ability]);
+        } catch (_e) { /* ignore */ }
+      }
+    }
+    return 0;
+  },
+
+  async _getCasterSpellDc(casterToken) {
+    if (!casterToken?.entity_id || casterToken.entity_type !== 'player') return 13;
+    const char = await characterOps.findById(casterToken.entity_id);
+    if (!char) return 13;
+    if (char.spell_save_dc) return parseInt(char.spell_save_dc, 10) || 13;
+    const ab = char.spellcasting_ability || 'intelligence';
+    const pb = char.proficiency_bonus || (2 + Math.floor(((parseInt(char.level, 10) || 1) - 1) / 4));
+    return 8 + pb + this._abilityMod(char[ab]);
+  },
+
+  async resolveAoeSpell(campaignId, userId, username, data) {
+    const { zone, spell, casterTokenId } = data || {};
+    if (!zone || !spell || !casterTokenId) return { ok: false, reason: 'bad_payload' };
+
+    const settings = await mapOps.getSettings(campaignId);
+    const gw = settings?.grid_width || 25;
+    const gh = settings?.grid_height || 18;
+    const serverCells = MapTactics.resolveZoneCells(zone, gw, gh);
+    const tokens = await mapOps.getTokens(campaignId);
+    const caster = tokens.find((t) => t.id === casterTokenId);
+    if (!caster) return { ok: false, reason: 'no_caster' };
+
+    const targets = MapTactics.tokensInZoneCells(tokens, serverCells);
+    const dc = await this._getCasterSpellDc(caster);
+    const saveAbility = spell.saveAbility || 'dexterity';
+    const isSave = spell.attackType === 'save' && spell.damage;
+    const fullDmg = spell.damage ? this._rollDamageExpr(spell.damage) : { rolls: [], total: 0 };
+
+    const results = [];
+    for (const target of targets) {
+      if (target.id === casterTokenId) continue;
+      let damage = fullDmg.total;
+      let saved = false;
+      let saveRoll = null;
+      if (isSave) {
+        const mod = await this._getTokenSaveMod(target, saveAbility);
+        saveRoll = this._rollDie(20) + mod;
+        saved = saveRoll >= dc;
+        if (saved) damage = Math.floor(damage / 2);
+      }
+      if (damage > 0) {
+        await this.applyDamageToToken(target.id, damage, campaignId);
+      }
+      results.push({
+        tokenId: target.id,
+        name: target.entity_name,
+        damage,
+        saved,
+        saveRoll,
+        dc
+      });
+    }
+
+    const zones = MapTactics.parseZonesList(settings?.map_zones || '[]');
+    const committed = {
+      ...zone,
+      id: zone.id || uuidv4(),
+      kind: 'spell',
+      cells: serverCells,
+      spellMeta: {
+        spellId: spell.id || spell.templateId || '',
+        name: spell.name || spell.namePl || 'Czar',
+        damage: spell.damage || '',
+        damageType: spell.damageType || '',
+        saveAbility,
+        durationRounds: spell.concentration ? null : 10
+      },
+      label: zone.label || spell.name || spell.namePl || 'Czar'
+    };
+    zones.push(committed);
+    await this.updateZones(campaignId, zones);
+
+    const logExpr = `${spell.name || spell.namePl || 'AoE'}: ${results.length} celów, ${fullDmg.total} obrażeń (ST ${saveAbility} DC ${dc})`;
+    const logEntry = await diceLogOps.create(
+      campaignId,
+      userId,
+      username || 'MG',
+      logExpr,
+      fullDmg.rolls,
+      fullDmg.total,
+      `AoE: ${spell.name || spell.namePl || 'czar'}`
+    );
+
+    return {
+      ok: true,
+      zone: committed,
+      zones,
+      results,
+      damageRoll: fullDmg,
+      dc,
+      logEntry
+    };
   }
 };
 

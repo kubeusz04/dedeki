@@ -7,6 +7,7 @@ const MapCreator = {
   activeTab: 'general',
   _blockSet: new Set(),
   _meta: { name: '', description: '', tags: '' },
+  _selectedPropTpl: 'water-barrel',
 
   init() {
     document.getElementById('btn-map-creator')?.addEventListener('click', () => this.open());
@@ -28,6 +29,7 @@ const MapCreator = {
         background_color: '#3b2618',
         background_image: '',
         map_blocking: [],
+        map_zones: [],
         fog_enabled: false,
         los_fog_blocks: true
       },
@@ -57,6 +59,13 @@ const MapCreator = {
         background_color: BattleMap.settings.background_color || '#3b2618',
         background_image: BattleMap.settings.background_image || '',
         map_blocking,
+        map_zones: typeof MapZones !== 'undefined'
+          ? [...MapZones.zones]
+          : (() => {
+            let z = BattleMap.settings?.map_zones;
+            if (typeof z === 'string') { try { z = JSON.parse(z); } catch { z = []; } }
+            return z || [];
+          })(),
         fog_enabled: !!BattleMap.settings.fog_enabled,
         los_fog_blocks: BattleMap.settings.los_fog_blocks !== 0
       },
@@ -147,8 +156,10 @@ const MapCreator = {
   },
 
   renderModal() {
+    const propN = this.draft.tokens.filter((t) => this.isPropToken(t)).length;
     const summary = {
-      tokens: this.draft.tokens.length,
+      tokens: this.draft.tokens.length - propN,
+      props: propN,
       pins: this.draft.pins.length,
       blocks: this._blockSet.size
     };
@@ -161,10 +172,12 @@ const MapCreator = {
         </button>`).join('')
       : '<p class="sheet-hint">Brak zapisanych presetów.</p>';
 
+    const propCount = this.draft.tokens.filter((t) => typeof MapProps !== 'undefined' && MapProps.parseNotes(t.stat_notes)).length;
     const tabs = [
       ['general', '⚙ Ogólne'],
       ['background', '🖼 Tło'],
       ['blocking', '🧱 Przeszkody'],
+      ['props', `📦 Rekwizyty (${propCount})`],
       ['enemies', '👹 Przeciwnicy'],
       ['pins', '📍 Pinezki & łup']
     ];
@@ -187,7 +200,7 @@ const MapCreator = {
           </div>
           <div class="map-creator-panel" id="map-creator-panel"></div>
           <div class="map-creator-footer">
-            <span class="sheet-hint">Tokeny: ${summary.tokens} · Pinezki: ${summary.pins} · Blokady: ${summary.blocks}</span>
+            <span class="sheet-hint">Tokeny: ${summary.tokens} · Rekwizyty: ${summary.props} · Pinezki: ${summary.pins} · Blokady: ${summary.blocks}</span>
             <div class="map-creator-footer-actions">
               ${this.activePresetId ? `<button type="button" class="btn btn-sm btn-danger" id="mc-delete">Usuń</button>
               <button type="button" class="btn btn-sm btn-secondary" id="mc-duplicate">Duplikuj</button>` : ''}
@@ -302,6 +315,11 @@ const MapCreator = {
       return;
     }
 
+    if (this.activeTab === 'props') {
+      this.renderPropsPanel(panel, s);
+      return;
+    }
+
     if (this.activeTab === 'enemies') {
       this.renderEnemiesPanel(panel, s);
       return;
@@ -386,6 +404,89 @@ const MapCreator = {
     });
   },
 
+  isPropToken(t) {
+    return typeof MapProps !== 'undefined' && !!MapProps.parseNotes(t.stat_notes);
+  },
+
+  renderPropsPanel(panel, s) {
+    const w = s.grid_width;
+    const h = s.grid_height;
+    const tplId = this._selectedPropTpl || 'water-barrel';
+    const templates = typeof MapPropTemplates !== 'undefined' ? MapPropTemplates.all() : [];
+    const cards = templates.map((t) => `
+      <button type="button" class="mc-prop-card ${tplId === t.id ? 'active' : ''}" data-prop-tpl="${t.id}" title="${escapeHtml(t.description)}">
+        <span class="mc-prop-icon">${t.icon}</span>
+        <span class="mc-prop-name">${escapeHtml(t.namePl)}</span>
+      </button>`).join('');
+
+    const propAt = new Map();
+    this.draft.tokens.forEach((t, i) => {
+      if (!this.isPropToken(t)) return;
+      propAt.set(`${t.x},${t.y}`, { t, i });
+    });
+
+    let cells = '';
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const key = `${x},${y}`;
+        const placed = propAt.get(key);
+        const label = placed ? (MapPropTemplates.get(MapProps.parseNotes(placed.t.stat_notes)?.templateId)?.icon || '📦') : '';
+        cells += `<button type="button" class="mc-prop-cell ${placed ? 'has-prop' : ''}" data-prop-cell="${key}">${label}</button>`;
+      }
+    }
+
+    panel.innerHTML = `
+      <p class="sheet-hint">Beczki, skrzynie, zagrożenia — po trafieniu lub zniszczeniu tworzą strefy terenu na mapie (np. woda, ogień).</p>
+      <div class="mc-prop-catalog">${cards}</div>
+      <p class="sheet-hint">Kliknij kratkę: postaw wybrany rekwizyt. Kliknij ponownie na ikonie — usuń.</p>
+      <div class="mc-prop-grid" style="--mc-cols:${w}">${cells}</div>
+      <div class="mc-entity-list mc-prop-list">${this.renderPropTokenRows()}</div>`;
+
+    panel.querySelectorAll('[data-prop-tpl]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this._selectedPropTpl = btn.dataset.propTpl;
+        this.renderPanel();
+      });
+    });
+
+    panel.querySelector('.mc-prop-grid')?.addEventListener('click', (e) => {
+      const cell = e.target.closest('[data-prop-cell]');
+      if (!cell) return;
+      const [x, y] = cell.dataset.propCell.split(',').map((n) => parseInt(n, 10));
+      const existing = propAt.get(`${x},${y}`);
+      if (existing) {
+        this.draft.tokens.splice(existing.i, 1);
+        this.renderPanel();
+        return;
+      }
+      const token = MapProps.tokenFromTemplate(this._selectedPropTpl, x, y);
+      if (token) this.draft.tokens.push(token);
+      this.renderPanel();
+    });
+
+    panel.querySelectorAll('.mc-del-prop').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.draft.tokens.splice(parseInt(btn.dataset.tokenIdx, 10), 1);
+        this.renderPanel();
+      });
+    });
+  },
+
+  renderPropTokenRows() {
+    const props = this.draft.tokens.filter((t) => this.isPropToken(t));
+    if (!props.length) return '<p class="sheet-hint">Brak rekwizytów na mapie.</p>';
+    return props.map((t) => {
+      const i = this.draft.tokens.indexOf(t);
+      const meta = MapProps.parseNotes(t.stat_notes);
+      const tpl = MapPropTemplates.get(meta?.templateId);
+      return `<div class="mc-entity-row">
+        <span>${tpl?.icon || '📦'} ${escapeHtml(t.entity_name)}</span>
+        <span class="sheet-hint">(${t.x}, ${t.y}) · ${t.hp_max} PW</span>
+        <button type="button" class="btn btn-sm btn-danger mc-del-prop" data-token-idx="${i}">✕</button>
+      </div>`;
+    }).join('');
+  },
+
   renderEnemiesPanel(panel, s) {
     const tplOpts = typeof NpcTemplates !== 'undefined'
       ? NpcTemplates.getAll().filter((t) => t.category === 'monster').slice(0, 80).map((t) =>
@@ -466,10 +567,13 @@ const MapCreator = {
   },
 
   renderTokenRows() {
-    if (!this.draft.tokens.length) {
+    const combat = this.draft.tokens.filter((t) => !this.isPropToken(t));
+    if (!combat.length) {
       return '<p class="sheet-hint">Brak tokenów — dodaj przeciwników lub NPC.</p>';
     }
-    return this.draft.tokens.map((t, i) => `
+    return combat.map((t) => {
+      const i = this.draft.tokens.indexOf(t);
+      return `
       <div class="mc-entity-row" data-token-idx="${i}">
         <input type="text" class="input-sm mc-t-name" value="${escapeHtml(t.entity_name)}" placeholder="Nazwa">
         <select class="input-sm mc-t-type">
@@ -483,7 +587,8 @@ const MapCreator = {
         <input type="number" class="input-sm mc-t-ac" value="${t.ac}" min="0" title="AC">
         <button type="button" class="btn btn-sm btn-danger mc-del" data-del-token="${i}">✕</button>
       </div>
-    `).join('');
+    `;
+    }).join('');
   },
 
   renderPinRows(lootOpts) {
