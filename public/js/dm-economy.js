@@ -2,23 +2,32 @@
 const DMEconomy = {
   merchants: [],
   lootTables: [],
+  customItems: [],
 
   init() {
     document.getElementById('btn-dm-economy')?.addEventListener('click', () => this.showHub());
     document.getElementById('btn-dm-merchant-quick')?.addEventListener('click', () => this.showCreateMerchant());
     document.getElementById('btn-dm-loot-quick')?.addEventListener('click', () => this.showSendLoot());
+    document.getElementById('btn-dm-custom-item-quick')?.addEventListener('click', () => this.showCreateCustomItem());
   },
 
   async load() {
-    if (!App.currentCampaign || App.currentCampaign.role !== 'dm') return;
+    if (!App.currentCampaign) return;
+    const isDm = App.currentCampaign.role === 'dm';
     try {
-      const [merchants, lootTables] = await Promise.all([
-        apiFetch(`/campaigns/${App.currentCampaign.id}/merchants`),
-        apiFetch(`/campaigns/${App.currentCampaign.id}/loot-tables`)
-      ]);
-      this.merchants = merchants;
-      this.lootTables = lootTables;
-      this.renderSidebar();
+      // Każdy członek kampanii może zobaczyć katalog własnych przedmiotów (potrzebne
+      // graczom do oglądania w karcie / sklepie). Tylko MG ładuje pełne sklepy/tabele.
+      const customItems = await apiFetch(`/campaigns/${App.currentCampaign.id}/custom-items`).catch(() => []);
+      this.customItems = customItems || [];
+      if (isDm) {
+        const [merchants, lootTables] = await Promise.all([
+          apiFetch(`/campaigns/${App.currentCampaign.id}/merchants`),
+          apiFetch(`/campaigns/${App.currentCampaign.id}/loot-tables`)
+        ]);
+        this.merchants = merchants;
+        this.lootTables = lootTables;
+        this.renderSidebar();
+      }
     } catch (err) {
       console.error('DMEconomy load', err);
     }
@@ -31,7 +40,87 @@ const DMEconomy = {
     el.innerHTML = `
       <p>Handlarze: <strong>${this.merchants.length}</strong> (otwartych: ${open})</p>
       <p>Tabele łupu: <strong>${this.lootTables.length}</strong></p>
+      <p>Własne przedmioty: <strong>${this.customItems.length}</strong></p>
     `;
+  },
+
+  // ===== Custom items helpers =====
+  // Buduje obiekt zgodny z DndRules.itemFromTemplate, ale dla własnego przedmiotu.
+  itemFromCustomTemplate(custom) {
+    if (!custom) return null;
+    const cat = String(custom.category || 'gear').toLowerCase();
+    const d = custom.data || {};
+    const base = {
+      id: `it-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      templateId: `custom:${custom.id}`,
+      name: custom.name,
+      category: cat,
+      quantity: 1,
+      weight: parseFloat(custom.weight) || 0,
+      description: custom.description || ''
+    };
+    if (cat === 'weapon' || d.damage) {
+      return {
+        ...base,
+        category: 'weapon',
+        damage: d.damage || '1d4',
+        damageType: d.damageType || 'bludgeoning',
+        ability: d.ability || 'strength',
+        properties: Array.isArray(d.properties) ? [...d.properties] : [],
+        range: d.range || '',
+        attackBonus: parseInt(d.attackBonus, 10) || 0,
+        damageBonus: parseInt(d.damageBonus, 10) || 0,
+        isProficient: true
+      };
+    }
+    if (cat === 'armor') {
+      return {
+        ...base,
+        equipSlot: 'armor',
+        armorClass: parseInt(d.armorClass, 10) || 10,
+        dexBonusMax: d.dexBonusMax === undefined ? 99 : parseInt(d.dexBonusMax, 10),
+        stealthDisadvantage: !!d.stealthDisadvantage
+      };
+    }
+    if (cat === 'shield') {
+      return { ...base, equipSlot: 'shield', acBonus: parseInt(d.acBonus, 10) || 2 };
+    }
+    return { ...base, equipSlot: d.equipSlot || '' };
+  },
+
+  // Zwraca pseudo-szablon używany w listach (np. catalogOptions): {id, namePl, priceCopper, ...}
+  customAsTemplate(custom) {
+    return {
+      id: `custom:${custom.id}`,
+      namePl: custom.name,
+      category: custom.category,
+      priceCopper: custom.price_copper || 0,
+      weight: custom.weight || 0,
+      __custom: true,
+      __ref: custom
+    };
+  },
+
+  // Generuje item z dowolnego id — zarówno wbudowanego (DndRules) jak i własnego (`custom:<uuid>`).
+  itemFromAnyTemplate(templateId) {
+    if (!templateId) return null;
+    if (String(templateId).startsWith('custom:')) {
+      const id = String(templateId).slice('custom:'.length);
+      const custom = this.customItems.find((c) => c.id === id);
+      return this.itemFromCustomTemplate(custom);
+    }
+    return DndRules.itemFromTemplate(templateId);
+  },
+
+  // Zwraca szablon (dla cen domyślnych) — wbudowany lub własny.
+  templateById(templateId) {
+    if (!templateId) return null;
+    if (String(templateId).startsWith('custom:')) {
+      const id = String(templateId).slice('custom:'.length);
+      const c = this.customItems.find((x) => x.id === id);
+      return c ? this.customAsTemplate(c) : null;
+    }
+    return DndRules.getItemTemplate(templateId);
   },
 
   showHub() {
@@ -45,6 +134,7 @@ const DMEconomy = {
         <div class="dm-economy-actions">
           <button type="button" class="btn btn-primary" id="dm-eco-new-merchant">➕ Nowy handlarz</button>
           <button type="button" class="btn btn-secondary" id="dm-eco-new-loot-table">📦 Tabela łupu</button>
+          <button type="button" class="btn btn-success" id="dm-eco-new-item">🛠️ Własny przedmiot</button>
           <button type="button" class="btn btn-secondary" id="dm-eco-grant-coins">🪙 Przyznaj monety</button>
           <button type="button" class="btn btn-warning" id="dm-eco-send-loot">🎁 Wyślij łup</button>
         </div>
@@ -52,15 +142,19 @@ const DMEconomy = {
         <div class="dm-merchant-list">${this.renderMerchantList()}</div>
         <h4>Tabele łupu</h4>
         <div class="dm-loot-table-list">${this.renderLootTableList()}</div>
+        <h4>Własne przedmioty</h4>
+        <div class="dm-custom-item-list">${this.renderCustomItemList()}</div>
       </div>
     `, 'modal-xl');
 
     document.getElementById('dm-eco-new-merchant')?.addEventListener('click', () => this.showCreateMerchant());
     document.getElementById('dm-eco-new-loot-table')?.addEventListener('click', () => this.showCreateLootTable());
+    document.getElementById('dm-eco-new-item')?.addEventListener('click', () => this.showCreateCustomItem());
     document.getElementById('dm-eco-grant-coins')?.addEventListener('click', () => this.showGrantCoins(charOptions));
     document.getElementById('dm-eco-send-loot')?.addEventListener('click', () => this.showSendLoot(charOptions));
     this.bindMerchantListEvents();
     this.bindLootTableListEvents();
+    this.bindCustomItemListEvents();
   },
 
   renderMerchantList() {
@@ -127,10 +221,48 @@ const DMEconomy = {
     });
   },
 
+  renderCustomItemList() {
+    if (!this.customItems.length) return '<p class="info-text">Brak własnych przedmiotów. Stwórz pierwszy, by używać go w sklepach i łupach.</p>';
+    const catLabels = { weapon: '⚔ broń', armor: '🛡 zbroja', shield: '🛡 tarcza', gear: '🎒 wyposażenie', potion: '🧪 mikstura', wondrous: '✨ cudowne', scroll: '📜 zwój', tool: '🔧 narzędzia' };
+    return this.customItems.map((it) => `
+      <div class="dm-custom-item-row" data-id="${it.id}">
+        <div>
+          <strong>${escapeHtml(it.name)}</strong>
+          <span class="dm-tag">${escapeHtml(catLabels[it.category] || it.category || 'gear')}</span>
+          <span class="dm-tag">${escapeHtml(DndRules.formatPriceCopper(it.price_copper || 0))}</span>
+          <div class="dm-meta">${escapeHtml((it.description || '').slice(0, 80))}</div>
+        </div>
+        <div class="dm-row-btns">
+          <button type="button" class="btn btn-sm btn-secondary dm-custom-edit" data-id="${it.id}">Edytuj</button>
+          <button type="button" class="btn btn-sm btn-danger dm-custom-del" data-id="${it.id}">✕</button>
+        </div>
+      </div>
+    `).join('');
+  },
+
+  bindCustomItemListEvents() {
+    document.querySelectorAll('.dm-custom-edit').forEach((btn) => {
+      btn.addEventListener('click', () => this.showEditCustomItem(btn.dataset.id));
+    });
+    document.querySelectorAll('.dm-custom-del').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('Usunąć ten przedmiot? Sklepy/łupy które już go zawierają zostaną nietknięte.')) return;
+        await apiFetch(`/custom-items/${btn.dataset.id}`, { method: 'DELETE' });
+        await this.load();
+        this.showHub();
+      });
+    });
+  },
+
   catalogOptions() {
-    return DndRules.ALL_ITEM_TEMPLATES().map((t) =>
+    const builtin = DndRules.ALL_ITEM_TEMPLATES().map((t) =>
       `<option value="${t.id}">${escapeHtml(t.namePl)} (${DndRules.formatPriceCopper(t.priceCopper || 100)})</option>`
     ).join('');
+    if (!this.customItems.length) return builtin;
+    const customOpts = this.customItems.map((c) =>
+      `<option value="custom:${c.id}">🛠️ ${escapeHtml(c.name)} (${DndRules.formatPriceCopper(c.price_copper || 0)})</option>`
+    ).join('');
+    return `<optgroup label="🛠️ Własne (${this.customItems.length})">${customOpts}</optgroup><optgroup label="📚 Katalog 5e">${builtin}</optgroup>`;
   },
 
   showCreateMerchant() {
@@ -162,10 +294,10 @@ const DMEconomy = {
 
     document.getElementById('dm-shop-add-line').addEventListener('click', () => {
       const tplId = document.getElementById('dm-shop-template').value;
-      const item = DndRules.itemFromTemplate(tplId);
+      const item = this.itemFromAnyTemplate(tplId);
       if (!item) return;
       const price = parseInt(document.getElementById('dm-shop-price').value, 10);
-      const tpl = DndRules.getItemTemplate(tplId);
+      const tpl = this.templateById(tplId);
       lines.push({
         id: `si-${Date.now()}-${lines.length}`,
         name: item.name,
@@ -257,7 +389,7 @@ const DMEconomy = {
       });
     };
     document.getElementById('dm-loot-add-entry').addEventListener('click', () => {
-      const item = DndRules.itemFromTemplate(document.getElementById('dm-loot-template').value);
+      const item = this.itemFromAnyTemplate(document.getElementById('dm-loot-template').value);
       if (!item) return;
       entries.push({ weight: parseInt(document.getElementById('dm-loot-weight').value, 10) || 1, item });
       render();
@@ -365,7 +497,7 @@ const DMEconomy = {
       });
     };
     document.getElementById('dm-loot-item-add').addEventListener('click', () => {
-      const it = DndRules.itemFromTemplate(document.getElementById('dm-loot-item-tpl').value);
+      const it = this.itemFromAnyTemplate(document.getElementById('dm-loot-item-tpl').value);
       if (it) { fixed.push(it); renderFixed(); }
     });
     document.getElementById('dm-loot-send').addEventListener('click', async () => {
@@ -387,5 +519,202 @@ const DMEconomy = {
         showToast(err.message, 'error');
       }
     });
+  },
+
+  // ===== Custom item editor =====
+  showCreateCustomItem(existing = null) {
+    const isEdit = !!existing;
+    const e = existing || {};
+    const cat = e.category || 'gear';
+    const d = e.data || {};
+    showGenericModal(isEdit ? '✏️ Edytuj przedmiot' : '🛠️ Nowy własny przedmiot', `
+      <div class="custom-item-editor">
+        <div class="form-row">
+          <div class="form-group" style="flex:2">
+            <label>Nazwa</label>
+            <input type="text" id="ci-name" value="${escapeHtml(e.name || '')}" placeholder="np. Klinga Cienia">
+          </div>
+          <div class="form-group" style="flex:1">
+            <label>Kategoria</label>
+            <select id="ci-category">
+              <option value="weapon"${cat === 'weapon' ? ' selected' : ''}>⚔ Broń</option>
+              <option value="armor"${cat === 'armor' ? ' selected' : ''}>🛡 Zbroja</option>
+              <option value="shield"${cat === 'shield' ? ' selected' : ''}>🛡 Tarcza</option>
+              <option value="gear"${cat === 'gear' ? ' selected' : ''}>🎒 Wyposażenie</option>
+              <option value="potion"${cat === 'potion' ? ' selected' : ''}>🧪 Mikstura</option>
+              <option value="wondrous"${cat === 'wondrous' ? ' selected' : ''}>✨ Cudowne</option>
+              <option value="scroll"${cat === 'scroll' ? ' selected' : ''}>📜 Zwój</option>
+              <option value="tool"${cat === 'tool' ? ' selected' : ''}>🔧 Narzędzia</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group" style="flex:1">
+            <label>Cena (w miedziakach, 100 MC = 1 MZ)</label>
+            <input type="number" id="ci-price" min="0" value="${parseInt(e.price_copper, 10) || 0}">
+          </div>
+          <div class="form-group" style="flex:1">
+            <label>Waga (lb)</label>
+            <input type="number" id="ci-weight" min="0" step="0.1" value="${parseFloat(e.weight) || 0}">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Opis / efekt</label>
+          <textarea id="ci-desc" rows="2" placeholder="np. Lekka klinga drow, w mroku zadaje +1d4 nekrotycznych...">${escapeHtml(e.description || '')}</textarea>
+        </div>
+
+        <div id="ci-fields-weapon" class="custom-item-cat-fields">
+          <h4>⚔ Broń</h4>
+          <div class="form-row">
+            <div class="form-group" style="flex:1">
+              <label>Kości obrażeń</label>
+              <input type="text" id="ci-w-damage" placeholder="1d8" value="${escapeHtml(d.damage || '')}">
+            </div>
+            <div class="form-group" style="flex:1">
+              <label>Typ</label>
+              <select id="ci-w-damageType">
+                ${['slashing', 'piercing', 'bludgeoning', 'fire', 'cold', 'lightning', 'thunder', 'poison', 'acid', 'necrotic', 'radiant', 'psychic', 'force']
+                  .map((t) => `<option value="${t}"${(d.damageType || 'slashing') === t ? ' selected' : ''}>${t}</option>`).join('')}
+              </select>
+            </div>
+            <div class="form-group" style="flex:1">
+              <label>Atrybut</label>
+              <select id="ci-w-ability">
+                <option value="strength"${(d.ability || 'strength') === 'strength' ? ' selected' : ''}>Siła</option>
+                <option value="dexterity"${d.ability === 'dexterity' ? ' selected' : ''}>Zręczność</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group" style="flex:1">
+              <label>Zasięg (np. 20/60, opcj.)</label>
+              <input type="text" id="ci-w-range" value="${escapeHtml(d.range || '')}" placeholder="dla broni dystansowych">
+            </div>
+            <div class="form-group" style="flex:1">
+              <label>Bonus atak</label>
+              <input type="number" id="ci-w-atkb" value="${parseInt(d.attackBonus, 10) || 0}">
+            </div>
+            <div class="form-group" style="flex:1">
+              <label>Bonus obraż.</label>
+              <input type="number" id="ci-w-dmgb" value="${parseInt(d.damageBonus, 10) || 0}">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Cechy</label>
+            <div class="custom-item-props">
+              ${['light', 'heavy', 'finesse', 'two-handed', 'versatile', 'thrown', 'reach', 'ammunition', 'loading', 'special', 'magical', 'silvered']
+                .map((p) => `<label class="prop-chip"><input type="checkbox" data-prop="${p}"${(d.properties || []).includes(p) ? ' checked' : ''}>${p}</label>`).join('')}
+            </div>
+          </div>
+        </div>
+
+        <div id="ci-fields-armor" class="custom-item-cat-fields" style="display:none">
+          <h4>🛡 Zbroja</h4>
+          <div class="form-row">
+            <div class="form-group" style="flex:1">
+              <label>Klasa Pancerza (KP)</label>
+              <input type="number" id="ci-a-ac" min="10" max="22" value="${parseInt(d.armorClass, 10) || 11}">
+            </div>
+            <div class="form-group" style="flex:1">
+              <label>Max bonus Zręczności</label>
+              <select id="ci-a-dexmax">
+                <option value="99"${(d.dexBonusMax === undefined || d.dexBonusMax === 99) ? ' selected' : ''}>bez limitu (lekka)</option>
+                <option value="2"${d.dexBonusMax === 2 ? ' selected' : ''}>+2 (średnia)</option>
+                <option value="0"${d.dexBonusMax === 0 ? ' selected' : ''}>+0 (ciężka)</option>
+              </select>
+            </div>
+            <div class="form-group" style="flex:1">
+              <label><input type="checkbox" id="ci-a-stealth"${d.stealthDisadvantage ? ' checked' : ''}> Utrudn. skradania</label>
+            </div>
+          </div>
+        </div>
+
+        <div id="ci-fields-shield" class="custom-item-cat-fields" style="display:none">
+          <h4>🛡 Tarcza</h4>
+          <div class="form-group">
+            <label>Bonus KP</label>
+            <input type="number" id="ci-s-acbonus" value="${parseInt(d.acBonus, 10) || 2}" min="1" max="5">
+          </div>
+        </div>
+
+        <div id="ci-fields-gear" class="custom-item-cat-fields" style="display:none">
+          <h4>🎒 Wyposażenie / inne</h4>
+          <div class="form-group">
+            <label>Slot ekwipunku (opcjonalnie — np. head, cloak, gloves, feet, amulet, ring1)</label>
+            <input type="text" id="ci-g-slot" value="${escapeHtml(d.equipSlot || '')}" placeholder="zostaw puste = trafia do plecaka">
+          </div>
+        </div>
+
+        <div class="form-row" style="margin-top:14px">
+          <button type="button" class="btn btn-primary" id="ci-save">${isEdit ? 'Zapisz zmiany' : 'Utwórz przedmiot'}</button>
+          <button type="button" class="btn btn-secondary" id="ci-cancel">Anuluj</button>
+        </div>
+      </div>
+    `, 'modal-lg');
+
+    const fields = ['weapon', 'armor', 'shield', 'gear'];
+    const refreshFields = () => {
+      const c = document.getElementById('ci-category').value;
+      const showAs = ({ weapon: 'weapon', armor: 'armor', shield: 'shield' }[c]) || 'gear';
+      fields.forEach((f) => {
+        const el = document.getElementById(`ci-fields-${f}`);
+        if (el) el.style.display = (f === showAs) ? '' : 'none';
+      });
+    };
+    document.getElementById('ci-category').addEventListener('change', refreshFields);
+    refreshFields();
+
+    document.getElementById('ci-cancel').addEventListener('click', () => closeModal('generic-modal'));
+
+    document.getElementById('ci-save').addEventListener('click', async () => {
+      const name = document.getElementById('ci-name').value.trim();
+      if (!name) return showToast('Podaj nazwę', 'warning');
+      const category = document.getElementById('ci-category').value;
+      const priceCopper = parseInt(document.getElementById('ci-price').value, 10) || 0;
+      const weight = parseFloat(document.getElementById('ci-weight').value) || 0;
+      const description = document.getElementById('ci-desc').value.trim();
+
+      const data = {};
+      if (category === 'weapon') {
+        data.damage = document.getElementById('ci-w-damage').value.trim() || '1d4';
+        data.damageType = document.getElementById('ci-w-damageType').value;
+        data.ability = document.getElementById('ci-w-ability').value;
+        data.range = document.getElementById('ci-w-range').value.trim();
+        data.attackBonus = parseInt(document.getElementById('ci-w-atkb').value, 10) || 0;
+        data.damageBonus = parseInt(document.getElementById('ci-w-dmgb').value, 10) || 0;
+        data.properties = [...document.querySelectorAll('#ci-fields-weapon [data-prop]:checked')].map((cb) => cb.dataset.prop);
+      } else if (category === 'armor') {
+        data.armorClass = parseInt(document.getElementById('ci-a-ac').value, 10) || 11;
+        data.dexBonusMax = parseInt(document.getElementById('ci-a-dexmax').value, 10);
+        data.stealthDisadvantage = document.getElementById('ci-a-stealth').checked;
+      } else if (category === 'shield') {
+        data.acBonus = parseInt(document.getElementById('ci-s-acbonus').value, 10) || 2;
+      } else {
+        const slot = document.getElementById('ci-g-slot').value.trim();
+        if (slot) data.equipSlot = slot;
+      }
+
+      const payload = { name, category, priceCopper, weight, description, data };
+      try {
+        if (isEdit) {
+          await apiFetch(`/custom-items/${existing.id}`, { method: 'PUT', body: JSON.stringify(payload) });
+          showToast('Przedmiot zaktualizowany', 'success');
+        } else {
+          await apiFetch(`/campaigns/${App.currentCampaign.id}/custom-items`, { method: 'POST', body: JSON.stringify(payload) });
+          showToast('Przedmiot utworzony', 'success');
+        }
+        closeModal('generic-modal');
+        await this.load();
+        this.showHub();
+      } catch (err) {
+        showToast(err.message || 'Błąd zapisu', 'error');
+      }
+    });
+  },
+
+  showEditCustomItem(id) {
+    const it = this.customItems.find((c) => c.id === id);
+    if (!it) return;
+    this.showCreateCustomItem(it);
   }
 };

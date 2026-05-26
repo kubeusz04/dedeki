@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Roll 1 - D&D Virtual Tabletop</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚔️</text></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎲</text></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@700&family=Cinzel:wght@500;600;700&family=EB+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
@@ -29,7 +29,7 @@
       <div class="auth-container">
         <div class="auth-header">
           <div class="logo">
-            <span class="logo-icon">⚔️</span>
+            <span class="logo-icon">🎲</span>
             <h1>Roll 1</h1>
             <p class="subtitle">Kronika Przygód · D&amp;D 5e</p>
           </div>
@@ -77,13 +77,14 @@
     <div id="dashboard-screen" class="screen">
       <header class="main-header">
         <div class="header-left">
-          <span class="logo-icon-sm">⚔️</span>
+          <span class="logo-icon-sm">🎲</span>
           <span class="header-title">Roll 1</span>
         </div>
         <div class="header-right">
           <span id="user-display-name" class="user-name"></span>
           <button id="btn-my-characters" class="btn btn-sm btn-secondary">📋 Moje Postacie</button>
           <button id="btn-import-char-global" class="btn btn-sm btn-secondary">📥 Importuj</button>
+          <button id="btn-theme" class="btn btn-sm btn-secondary" title="Motyw interfejsu">🎨 Motyw</button>
           <button id="btn-logout" class="btn btn-sm btn-danger">Wyloguj</button>
         </div>
       </header>
@@ -226,6 +227,7 @@
                 </div>
                 <div class="map-tool-group map-tool-group-dm dm-only">
                   <button id="btn-add-token" class="btn btn-sm btn-primary" type="button">➕ Token</button>
+                  <button id="btn-token-library" class="btn btn-sm btn-secondary" type="button" title="Biblioteka grafik tokenów">🖼️ Tokeny</button>
                   <button id="btn-upload-map-bg" class="btn btn-sm btn-secondary" type="button">🖼️ Tło</button>
                   <button id="btn-map-creator" class="btn btn-sm btn-secondary" type="button" title="Kreator map i presety">🗺️ Kreator</button>
                   <button id="btn-map-save-preset" class="btn btn-sm btn-secondary" type="button" title="Zapisz obecną mapę jako preset">💾 Preset</button>
@@ -239,10 +241,20 @@
                   <button id="btn-clear-map" class="btn btn-sm btn-danger" type="button">🗑️</button>
                 </div>
                 <div class="map-tool-group">
-                  <button id="btn-map-zoom-out" class="btn btn-sm btn-secondary" type="button">−</button>
-                  <button id="btn-map-zoom-in" class="btn btn-sm btn-secondary" type="button">+</button>
-                  <label class="map-grid-label dm-only">Siatka
-                    <input type="number" id="map-grid-size" value="40" min="20" max="80" class="input-sm">
+                  <button id="btn-map-zoom-out" class="btn btn-sm btn-secondary" type="button" title="Pomniejsz">−</button>
+                  <button id="btn-map-zoom-in" class="btn btn-sm btn-secondary" type="button" title="Powiększ">+</button>
+                  <button id="btn-map-fit" class="btn btn-sm btn-secondary" type="button" title="Dopasuj mapę do okna">⤢</button>
+                  <label class="map-grid-label dm-only" title="Rozdzielczość mapy 16:9 — wyższa = ostrzejsze tokeny i cyfry">Rozdzielczość
+                    <select id="map-resolution-preset" class="input-sm">
+                      <option value="">(własna)</option>
+                      <option value="720">HD 720p (40 px/kratka)</option>
+                      <option value="1080" selected>FHD 1080p (60 px/kratka)</option>
+                      <option value="1440">2K 1440p (80 px/kratka)</option>
+                      <option value="2160">4K 2160p (120 px/kratka)</option>
+                    </select>
+                  </label>
+                  <label class="map-grid-label dm-only" title="Rozmiar pojedynczej kratki w pikselach">Siatka
+                    <input type="number" id="map-grid-size" value="60" min="20" max="200" class="input-sm">
                   </label>
                   <label class="map-grid-label map-grid-opacity-label dm-only" title="Przezroczystość linii i etykiet siatki">
                     Widoczność siatki
@@ -251,22 +263,26 @@
                       <output id="map-grid-opacity-value" for="map-grid-opacity">100%</output>
                     </span>
                   </label>
-                  <label class="map-grid-label dm-only">Pędzel
+                  <label class="map-grid-label dm-only" title="Promień pędzla — mgła, blokady, teren">Pędzel
                     <select id="map-fog-brush" class="input-sm">
-                      <option value="1">1</option>
-                      <option value="2" selected>2</option>
-                      <option value="3">3</option>
+                      <option value="1">1 (kratka)</option>
+                      <option value="2" selected>2 (3×3)</option>
+                      <option value="3">3 (5×5)</option>
+                      <option value="4">4 (7×7)</option>
+                      <option value="5">5 (9×9)</option>
                     </select>
                   </label>
-                  <label class="map-grid-label dm-only" title="Typ malowanego terenu">
+                  <label class="map-grid-label dm-only" title="Typ malowanego terenu — fire/acid/poison/lightning/necrotic zadają obrażenia">
                     Teren
                     <select id="map-zone-terrain-select" class="input-sm">
                       <option value="difficult">Trudny</option>
                       <option value="ice">Lód</option>
                       <option value="mud">Błoto</option>
-                      <option value="fire">Ogień</option>
-                      <option value="acid">Kwas</option>
-                      <option value="poison">Trucizna</option>
+                      <option value="fire">🔥 Ogień (1d6)</option>
+                      <option value="acid">🧪 Kwas (1d4)</option>
+                      <option value="poison">☠️ Trucizna (1d4)</option>
+                      <option value="lightning">⚡ Błyskawica (1d6)</option>
+                      <option value="necrotic">💀 Nekroza (1d4)</option>
                       <option value="water">Woda</option>
                     </select>
                   </label>
@@ -275,6 +291,7 @@
               </div>
               <input type="file" id="map-bg-file" accept="image/*" class="sr-only-input" tabindex="-1">
               <input type="file" id="token-image-file" accept="image/*" class="sr-only-input" tabindex="-1">
+              <input type="file" id="token-library-upload" accept="image/*" class="sr-only-input" tabindex="-1">
             </header>
               <div class="map-combat-bar" id="map-combat-bar">
                 <div class="map-combat-bar-left">
@@ -288,6 +305,7 @@
                   </div>
                   <div id="map-init-order-track" class="map-init-order-track"></div>
                 </div>
+                <div id="map-selected-turn-info" class="map-selected-turn-info hidden"></div>
                 <div class="map-combat-bar-actions">
                   <button type="button" id="map-btn-reset-movement" class="btn btn-sm btn-secondary dm-only hidden" title="Przywróć pełny ruch aktywnego tokena">↺ Ruch</button>
                   <button type="button" id="map-btn-end-turn" class="btn btn-sm btn-primary" disabled>Zakończ turę</button>
@@ -319,12 +337,15 @@
               <div class="map-container" id="map-viewport">
                 <canvas id="battle-map"></canvas>
                 <div id="map-action-wheel" class="map-action-wheel hidden" role="menu" aria-label="Koło akcji">
-                  <button type="button" data-combat-action="move" title="Ruch">🏃</button>
-                  <button type="button" data-combat-action="attack" title="Atak">⚔</button>
-                  <button type="button" data-combat-action="spell" title="Czar">✨</button>
-                  <button type="button" data-combat-action="bonus" title="Akcja dodatkowa">➕</button>
-                  <button type="button" data-combat-action="save" title="Rzut obronny">🛡</button>
-                  <button type="button" data-combat-action="end" title="Koniec tury">⏭</button>
+                  <div class="map-action-wheel-core" aria-hidden="true">
+                    <span class="map-action-wheel-label" id="map-action-wheel-label">Token</span>
+                  </div>
+                  <button type="button" data-combat-action="move" class="wheel-btn wheel-move" title="Ruch" data-label="Ruch">🏃</button>
+                  <button type="button" data-combat-action="attack" class="wheel-btn wheel-attack" title="Atak" data-label="Atak">⚔</button>
+                  <button type="button" data-combat-action="spell" class="wheel-btn wheel-spell" title="Czar" data-label="Czar">✨</button>
+                  <button type="button" data-combat-action="bonus" class="wheel-btn wheel-bonus" title="Akcja dodatkowa" data-label="Bonus">➕</button>
+                  <button type="button" data-combat-action="save" class="wheel-btn wheel-save" title="Rzut obronny" data-label="Save">🛡</button>
+                  <button type="button" data-combat-action="end" class="wheel-btn wheel-end" title="Koniec tury" data-label="Koniec">⏭</button>
                 </div>
               </div>
               <aside class="map-sidebar map-fs-panel map-fs-panel-right" id="map-sidebar">
@@ -477,6 +498,13 @@
                   </div>
                   <div class="dice-row dice-roll-actions">
                     <button type="button" id="btn-roll-dice" class="btn btn-primary">🎲 Rzuć kośćmi</button>
+                    <button type="button" id="btn-dice-skins" class="btn btn-secondary" title="Wybierz wygląd kości">🎨 Skórki kości</button>
+                  </div>
+                  <div class="dice-row dice-prefs">
+                    <label class="dice-pref-toggle" title="Po każdym rzucie automatycznie pokaż animację na tej zakładce, potem wróć">
+                      <input type="checkbox" id="dice-auto-switch-toggle" checked>
+                      <span>🎬 Auto-przełącz na animację rzutu</span>
+                    </label>
                   </div>
                 </div>
               </div>
@@ -503,21 +531,6 @@
                     <button class="btn btn-ability" data-ability="intelligence" disabled>Inteligencja (INT)</button>
                     <button class="btn btn-ability" data-ability="wisdom" disabled>Mądrość (WIS)</button>
                     <button class="btn btn-ability" data-ability="charisma" disabled>Charyzma (CHA)</button>
-                  </div>
-                  <div class="ability-group combat-group map-combat-redirect">
-                    <h4>Walka</h4>
-                    <p class="info-text">Ataki, czary i rzuty obronne są na <strong>Mapie bitwy</strong> (koło akcji po podwójnym kliku tokena).</p>
-                    <button type="button" class="btn btn-secondary btn-full" onclick="document.querySelector('.session-tab[data-panel=\'map-panel\']')?.click()">🗺️ Otwórz mapę</button>
-                  </div>
-                  <div class="ability-group spell-roll-group hidden" id="spell-roll-group" aria-hidden="true">
-                    <h4>🔮 Czary w walce</h4>
-                    <button type="button" id="btn-roll-spell" class="btn btn-spell" disabled>🔮 Rzuć czar</button>
-                    <p id="spell-roll-hint" class="info-text">Wybierz postać z listą czarów na karcie.</p>
-                    <div id="spell-quick-list" class="spell-quick-list"></div>
-                  </div>
-                  <div class="ability-group map-combat-redirect">
-                    <h4>Rzuty Obronne</h4>
-                    <p class="info-text">Użyj panelu walki na mapie lub koła akcji (🛡).</p>
                   </div>
                   <div class="ability-group skills-group">
                     <h4>Umiejętności</h4>
@@ -555,6 +568,7 @@
                 <button type="button" id="btn-dm-economy" class="btn btn-primary">🏪 Handlarze i łup</button>
                 <button type="button" id="btn-dm-merchant-quick" class="btn btn-secondary">➕ Handlarz</button>
                 <button type="button" id="btn-dm-loot-quick" class="btn btn-secondary">🎁 Wyślij łup</button>
+                <button type="button" id="btn-dm-custom-item-quick" class="btn btn-success">🛠️ Własny przedmiot</button>
               </div>
             </div>
             <div class="dm-section dm-section-wide">
@@ -659,6 +673,7 @@
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="/js/utils.js"></script>
+  <script src="/js/themes.js"></script>
   <script src="/js/dnd5e-rules.js"></script>
   <script src="/js/dnd5e-subclasses.js"></script>
   <script src="/js/dnd5e-spells.js"></script>
@@ -667,6 +682,7 @@
   <script src="/js/characters.js"></script>
   <script src="/js/player-hud.js"></script>
   <script src="/js/dice.js"></script>
+  <script src="/js/dice-skins.js"></script>
   <script src="/js/chat.js"></script>
   <script src="/js/campaign-music.js"></script>
   <script src="/js/map-tactics.js"></script>
@@ -686,6 +702,7 @@
   <script src="/js/dnd-npc-templates.js"></script>
   <script src="/js/economy.js"></script>
   <script src="/js/dm-economy.js"></script>
+  <script src="/js/token-library.js"></script>
   <script src="/js/dm-panel.js"></script>
   <script src="/js/app.js"></script>
 </body>

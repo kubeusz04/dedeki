@@ -1,4 +1,6 @@
 // ===== D&D 5e spell catalog =====
+// Node/browser dual-mode: w przeglądarce const stanie się top-level binding,
+// w Node module.exports na końcu udostępnia ten sam obiekt.
 const DndSpells = {
   SCHOOLS_PL: {
     abjuration: 'ochrona', conjuration: 'przywoływanie', divination: 'wróżbiarstwo',
@@ -20,7 +22,7 @@ const DndSpells = {
       return 5;
     }
     if (!this.FULL_CASTERS.includes(className) && className !== 'Warlock') {
-      const ab = DndRules.getClassProfile(className).spellcastingAbility;
+      const ab = this.getSpellcastingAbility({ char_class: className });
       if (!ab) return 0;
     }
     if (lvl < 3) return 1;
@@ -34,22 +36,41 @@ const DndSpells = {
     return 9;
   },
 
+  _dndRules() {
+    return typeof DndRules !== 'undefined' ? DndRules : null;
+  },
+
+  _calcMod(v) {
+    if (typeof calcModifier === 'function') return calcModifier(v);
+    return Math.floor((parseInt(v, 10) - 10) / 2);
+  },
+
+  _profBonus(char) {
+    if (char.proficiency_bonus) return char.proficiency_bonus;
+    const r = this._dndRules();
+    if (r?.proficiencyBonus) return r.proficiencyBonus(char.level);
+    const lvl = Math.max(1, parseInt(char.level, 10) || 1);
+    return 2 + Math.floor((lvl - 1) / 4);
+  },
+
   getSpellcastingAbility(char) {
-    return char.spellcasting_ability || DndRules.getClassProfile(char.char_class || '').spellcastingAbility || '';
+    if (char.spellcasting_ability) return char.spellcasting_ability;
+    const r = this._dndRules();
+    if (r?.getClassProfile) return r.getClassProfile(char.char_class || '').spellcastingAbility || '';
+    const map = { Wizard: 'intelligence', Sorcerer: 'charisma', Bard: 'charisma', Cleric: 'wisdom', Druid: 'wisdom', Warlock: 'charisma', Paladin: 'charisma', Ranger: 'wisdom', Artificer: 'intelligence' };
+    return map[char.char_class] || '';
   },
 
   getSpellAttackBonus(char) {
     const ab = this.getSpellcastingAbility(char);
     if (!ab) return 0;
-    const pb = char.proficiency_bonus || DndRules.proficiencyBonus(char.level);
-    return pb + calcModifier(char[ab] || 10);
+    return this._profBonus(char) + this._calcMod(char[ab] || 10);
   },
 
   getSpellSaveDc(char) {
     const ab = this.getSpellcastingAbility(char);
     if (!ab) return 8;
-    const pb = char.proficiency_bonus || DndRules.proficiencyBonus(char.level);
-    return 8 + pb + calcModifier(char[ab] || 10);
+    return 8 + this._profBonus(char) + this._calcMod(char[ab] || 10);
   },
 
   getTemplate(id) {
@@ -160,11 +181,161 @@ const DndSpells = {
   },
 
   parseSpellsKnown(char) {
-    return Characters.parseJSON(char.spells_known).map((s) => this.normalizeSpell(s)).filter(Boolean);
+    const parseJson = (typeof Characters !== 'undefined' && Characters.parseJSON)
+      ? Characters.parseJSON
+      : (raw) => {
+          if (!raw) return [];
+          if (Array.isArray(raw)) return raw;
+          try { const v = JSON.parse(raw); return Array.isArray(v) ? v : []; } catch (_e) { return []; }
+        };
+    return parseJson(char.spells_known).map((s) => this.normalizeSpell(s)).filter(Boolean);
   },
 
   levelLabel(level) {
     return level === 0 ? 'Cantrip' : `Poziom ${level}`;
+  },
+
+  // ============ SLOTY CZARÓW (5e PHB) ============
+  // Tabele [classLevel][spellLevel] -> liczba slotów. Indeks 0 niewykorzystany.
+  FULL_CASTER_SLOTS: [
+    null, // 0
+    { 1: 2 },
+    { 1: 3 },
+    { 1: 4, 2: 2 },
+    { 1: 4, 2: 3 },
+    { 1: 4, 2: 3, 3: 2 },
+    { 1: 4, 2: 3, 3: 3 },
+    { 1: 4, 2: 3, 3: 3, 4: 1 },
+    { 1: 4, 2: 3, 3: 3, 4: 2 },
+    { 1: 4, 2: 3, 3: 3, 4: 3, 5: 1 },
+    { 1: 4, 2: 3, 3: 3, 4: 3, 5: 2 },
+    { 1: 4, 2: 3, 3: 3, 4: 3, 5: 2, 6: 1 },
+    { 1: 4, 2: 3, 3: 3, 4: 3, 5: 2, 6: 1 },
+    { 1: 4, 2: 3, 3: 3, 4: 3, 5: 2, 6: 1, 7: 1 },
+    { 1: 4, 2: 3, 3: 3, 4: 3, 5: 2, 6: 1, 7: 1 },
+    { 1: 4, 2: 3, 3: 3, 4: 3, 5: 2, 6: 1, 7: 1, 8: 1 },
+    { 1: 4, 2: 3, 3: 3, 4: 3, 5: 2, 6: 1, 7: 1, 8: 1 },
+    { 1: 4, 2: 3, 3: 3, 4: 3, 5: 2, 6: 1, 7: 1, 8: 1, 9: 1 },
+    { 1: 4, 2: 3, 3: 3, 4: 3, 5: 3, 6: 1, 7: 1, 8: 1, 9: 1 },
+    { 1: 4, 2: 3, 3: 3, 4: 3, 5: 3, 6: 2, 7: 1, 8: 1, 9: 1 },
+    { 1: 4, 2: 3, 3: 3, 4: 3, 5: 3, 6: 2, 7: 2, 8: 1, 9: 1 }
+  ],
+
+  HALF_CASTER_SLOTS: [
+    null,
+    {}, // 1
+    { 1: 2 },
+    { 1: 3 },
+    { 1: 3 },
+    { 1: 4, 2: 2 },
+    { 1: 4, 2: 2 },
+    { 1: 4, 2: 3 },
+    { 1: 4, 2: 3 },
+    { 1: 4, 2: 3, 3: 2 },
+    { 1: 4, 2: 3, 3: 2 },
+    { 1: 4, 2: 3, 3: 3 },
+    { 1: 4, 2: 3, 3: 3 },
+    { 1: 4, 2: 3, 3: 3, 4: 1 },
+    { 1: 4, 2: 3, 3: 3, 4: 1 },
+    { 1: 4, 2: 3, 3: 3, 4: 2 },
+    { 1: 4, 2: 3, 3: 3, 4: 2 },
+    { 1: 4, 2: 3, 3: 3, 4: 3, 5: 1 },
+    { 1: 4, 2: 3, 3: 3, 4: 3, 5: 1 },
+    { 1: 4, 2: 3, 3: 3, 4: 3, 5: 2 },
+    { 1: 4, 2: 3, 3: 3, 4: 3, 5: 2 }
+  ],
+
+  WARLOCK_SLOTS: [
+    null,
+    { 1: 1 },
+    { 1: 2 },
+    { 2: 2 }, { 2: 2 },
+    { 3: 2 }, { 3: 2 },
+    { 4: 2 }, { 4: 2 },
+    { 5: 2 }, { 5: 2 },
+    { 5: 3 }, { 5: 3 }, { 5: 3 }, { 5: 3 }, { 5: 3 }, { 5: 3 },
+    { 5: 4 }, { 5: 4 },
+    { 5: 4 }, { 5: 4 }
+  ],
+
+  getMaxSpellSlots(className, characterLevel) {
+    const lvl = Math.max(1, Math.min(20, parseInt(characterLevel, 10) || 1));
+    if (className === 'Warlock') return { ...(this.WARLOCK_SLOTS[lvl] || {}) };
+    if (this.HALF_CASTERS.includes(className)) return { ...(this.HALF_CASTER_SLOTS[lvl] || {}) };
+    if (this.FULL_CASTERS.includes(className)) return { ...(this.FULL_CASTER_SLOTS[lvl] || {}) };
+    return {};
+  },
+
+  // Stored shape in DB: { used: { "1": 0, "2": 1, ... } }
+  // Empty / unset = nothing used (full slots).
+  parseSlotsState(char) {
+    if (!char) return { used: {} };
+    let raw = char.spell_slots;
+    if (typeof raw === 'string') {
+      try { raw = JSON.parse(raw || '{}'); } catch (_e) { raw = {}; }
+    }
+    if (!raw || typeof raw !== 'object') raw = {};
+    return { used: { ...(raw.used || {}) } };
+  },
+
+  getRemainingSlots(char) {
+    const max = this.getMaxSpellSlots(char.char_class || '', char.level || 1);
+    const { used } = this.parseSlotsState(char);
+    const remaining = {};
+    Object.keys(max).forEach((lv) => {
+      const u = parseInt(used[lv] || 0, 10);
+      remaining[lv] = Math.max(0, (max[lv] || 0) - u);
+    });
+    return remaining;
+  },
+
+  hasSlot(char, spellLevel) {
+    const lv = parseInt(spellLevel, 10) || 0;
+    if (lv <= 0) return true; // cantrips: bez ograniczeń
+    const remaining = this.getRemainingSlots(char);
+    // Możliwość rzucenia na wyższym slocie (upcasting)
+    for (let i = lv; i <= 9; i++) {
+      if ((remaining[i] || 0) > 0) return true;
+    }
+    return false;
+  },
+
+  lowestAvailableSlotFor(char, spellLevel) {
+    const lv = parseInt(spellLevel, 10) || 0;
+    if (lv <= 0) return 0;
+    const remaining = this.getRemainingSlots(char);
+    for (let i = lv; i <= 9; i++) {
+      if ((remaining[i] || 0) > 0) return i;
+    }
+    return -1;
+  },
+
+  // Zwraca NOWY obiekt spell_slots ({used:{...}}) z odjętym jednym slotem na poziomie slotLevel.
+  // Zwraca null jeśli brak slotu.
+  consumeSlot(char, slotLevel) {
+    const lv = parseInt(slotLevel, 10) || 0;
+    if (lv <= 0) return this.parseSlotsState(char); // bez kosztu
+    const max = this.getMaxSpellSlots(char.char_class || '', char.level || 1);
+    if (!(max[lv] || 0)) return null;
+    const state = this.parseSlotsState(char);
+    const used = parseInt(state.used[lv] || 0, 10);
+    if (used >= max[lv]) return null;
+    state.used[lv] = used + 1;
+    return state;
+  },
+
+  resetSlots(char) {
+    return { used: {} };
+  },
+
+  // 5e casting-time -> action economy bucket.
+  getCastingTimeKind(spell) {
+    const ct = String(spell?.castingTime || '').toLowerCase();
+    if (!ct) return 'action';
+    if (ct.includes('reakcja')) return 'reaction';
+    if (ct.includes('dodatkowa') || ct.includes('bonus')) return 'bonus';
+    if (ct.includes('min') || ct.includes('godz') || ct.includes('rytuał')) return 'long';
+    return 'action';
   },
 
   // ——— Katalog (PHB / podstawowe 5e) ———
@@ -262,3 +433,7 @@ const DndSpells = {
     { id: 'wish', namePl: 'Życzenie', level: 9, school: 'conjuration', classes: ['Wizard', 'Sorcerer'], attackType: 'none', castingTime: '1 akcja', range: 'Ty', duration: 'Natychmiast', description: 'Najpotężniejsza magia — duplikuje czar 8 lub niższy.' }
   ]
 };
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = DndSpells;
+}

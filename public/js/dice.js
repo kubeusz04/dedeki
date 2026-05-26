@@ -48,6 +48,13 @@ const Dice = {
 
     document.getElementById('btn-roll-attack')?.addEventListener('click', () => this.rollAttackFlow());
     document.getElementById('btn-roll-spell')?.addEventListener('click', () => this.rollSpellFlow());
+
+    // Przełącznik auto-switch (zsynchronizuj z localStorage)
+    const autoToggle = document.getElementById('dice-auto-switch-toggle');
+    if (autoToggle) {
+      autoToggle.checked = this.isAutoSwitchEnabled();
+      autoToggle.addEventListener('change', () => this.setAutoSwitch(autoToggle.checked));
+    }
   },
 
   rollDie(sides) {
@@ -201,57 +208,87 @@ const Dice = {
     return arr;
   },
 
-  SLOT_ITEM_HEIGHT: 56,
-
-  buildReelItems(sides, finalValue) {
-    const items = [];
-    const cycles = 4 + Math.floor(Math.random() * 2);
-    for (let c = 0; c < cycles - 1; c++) {
-      const cycle = Array.from({ length: sides }, (_, i) => i + 1);
-      this.shuffleArray(cycle);
-      items.push(...cycle);
-    }
-    const tail = 8 + Math.floor(Math.random() * sides);
-    for (let i = 0; i < tail; i++) {
-      items.push(Math.floor(Math.random() * sides) + 1);
-    }
-    items.push(finalValue);
-    return items;
+  // Każda kostka to płaski 2D wielokąt obracający się wokół osi środkowej (jak felga).
+  // d6 = kwadrat z pipsami, reszta = wielokąt SVG (trójkąt, romb, pięciokąt, dwudziestokąt jako koło).
+  DICE_SHAPES: {
+    4:   { kind: 'polygon', points: '50,6 92,84 8,84' },
+    6:   { kind: 'square' },
+    8:   { kind: 'polygon', points: '50,4 95,50 50,96 5,50' },
+    10:  { kind: 'polygon', points: '50,4 94,34 78,90 22,90 6,34' },
+    12:  { kind: 'polygon', points: '50,6 88,29 88,71 50,94 12,71 12,29' },
+    20:  { kind: 'polygon', points: '50,4 80,17 95,46 86,82 60,96 40,96 14,82 5,46 20,17' },
+    100: { kind: 'polygon', points: '50,4 94,34 78,90 22,90 6,34' }
   },
 
-  buildSlotReel(sides, finalValue) {
-    const clamped = Math.max(1, Math.min(sides, finalValue || 1));
-    const items = this.buildReelItems(sides, clamped);
-    const targetIndex = items.length - 1;
+  getDieShape(sides) {
+    return this.DICE_SHAPES[sides] || this.DICE_SHAPES[20];
+  },
 
-    const reel = document.createElement('div');
-    reel.className = `slot-machine-reel die-d${sides}`;
-    reel.innerHTML = `
-      <div class="slot-reel-label">d${sides}</div>
-      <div class="slot-reel-window">
-        <div class="slot-reel-strip"></div>
-        <div class="slot-reel-marker" aria-hidden="true"></div>
+  buildDie(sides, finalValue) {
+    const clamped = Math.max(1, Math.min(sides, finalValue || 1));
+    const shape = this.getDieShape(sides);
+    const die = document.createElement('div');
+    die.className = `dice3d die-d${sides}`;
+
+    let shapeHtml;
+    if (shape.kind === 'square') {
+      // d6 — płaski kwadrat z pipsami (kręci się jak koło). Pipsy losowane co klatkę przez updateDieValue.
+      shapeHtml = `<div class="dice2d-square">
+        <div class="cube-pips">${this._cubeDots(clamped)}</div>
+      </div>`;
+    } else {
+      // Płaski wielokąt SVG + opcjonalny obraz wpasowany do kształtu przez clip-path.
+      const clipPts = shape.points.split(/\s+/).map((p) => {
+        const [x, y] = p.split(',').map(Number);
+        return `${x}% ${y}%`;
+      }).join(', ');
+      shapeHtml = `<svg class="dice2d-poly" viewBox="0 0 100 100" aria-hidden="true" preserveAspectRatio="none">
+        <polygon points="${shape.points}" />
+        <foreignObject x="0" y="0" width="100" height="100">
+          <div xmlns="http://www.w3.org/1999/xhtml" class="dice2d-face-img"
+               style="width:100%;height:100%;background-image:var(--die-d${sides}-face-image, none);background-size:cover;background-position:center;clip-path:polygon(${clipPts});-webkit-clip-path:polygon(${clipPts});"></div>
+        </foreignObject>
+      </svg>`;
+    }
+
+    die.innerHTML = `
+      <div class="dice3d-label">d${sides}</div>
+      <div class="dice3d-stage">
+        ${shapeHtml}
+        <div class="dice3d-value">?</div>
       </div>
     `;
 
-    const strip = reel.querySelector('.slot-reel-strip');
-    strip.innerHTML = items.map((n) =>
-      `<div class="slot-reel-item">${n}</div>`
-    ).join('');
-
     return {
-      reel,
-      strip,
-      targetY: targetIndex * this.SLOT_ITEM_HEIGHT,
-      finalValue: clamped
+      die,
+      stage: die.querySelector('.dice3d-stage'),
+      valueEl: die.querySelector('.dice3d-value'),
+      sides,
+      finalValue: clamped,
     };
   },
 
-  getSlotAnimationTiming(rollCount) {
+  // Standard pip layout for a six-sided die face.
+  _cubeDots(face) {
+    const layouts = {
+      1: [[2, 2]],
+      2: [[1, 1], [3, 3]],
+      3: [[1, 1], [2, 2], [3, 3]],
+      4: [[1, 1], [1, 3], [3, 1], [3, 3]],
+      5: [[1, 1], [1, 3], [2, 2], [3, 1], [3, 3]],
+      6: [[1, 1], [1, 2], [1, 3], [3, 1], [3, 2], [3, 3]],
+    };
+    const dots = (layouts[face] || []).map(([r, c]) =>
+      `<span class="cube-pip" style="grid-row:${r};grid-column:${c};"></span>`
+    ).join('');
+    return `<span class="cube-pips">${dots}</span>`;
+  },
+
+  getDiceAnimationTiming(rollCount) {
     const count = Math.max(1, rollCount || 1);
-    const spinMs = Math.min(2800, 1800 + count * 160);
-    const staggerMs = 140;
-    const totalMs = spinMs + (count - 1) * staggerMs + 120;
+    const spinMs = Math.min(2400, 1500 + count * 120);
+    const staggerMs = 80;
+    const totalMs = spinMs + (count - 1) * staggerMs + 200;
     return { spinMs, staggerMs, totalMs };
   },
 
@@ -259,84 +296,156 @@ const Dice = {
     const stage = document.getElementById('dice-animation');
     if (!stage) return 0;
 
-    clearTimeout(this._slotFinishTimer);
+    clearTimeout(this._diceFinishTimer);
+    clearInterval(this._diceCycleInterval);
     stage.innerHTML = '';
     stage.classList.add('is-rolling');
     stage.setAttribute('aria-hidden', 'false');
 
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      const machine = document.createElement('div');
-      machine.className = 'slot-machine slot-machine-static';
-      rolls.forEach((finalVal, i) => {
-        const s = sidesList[i] ?? sidesList[sidesList.length - 1] ?? 20;
-        const { reel } = this.buildSlotReel(s, finalVal);
-        reel.classList.add('is-stopped');
-        const strip = reel.querySelector('.slot-reel-strip');
-        if (strip) {
-          strip.style.transform = `translateY(-${(strip.children.length - 1) * this.SLOT_ITEM_HEIGHT}px)`;
-        }
-        machine.appendChild(reel);
-      });
-      stage.appendChild(machine);
-      return 0;
-    }
+    const tray = document.createElement('div');
+    tray.className = 'dice-tray';
 
-    const machine = document.createElement('div');
-    machine.className = 'slot-machine is-spinning';
-    const timing = this.getSlotAnimationTiming(rolls.length);
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduced) tray.classList.add('reduced-motion');
+    else tray.classList.add('is-spinning');
 
-    this._slotReels = rolls.map((finalVal, i) => {
+    const built = rolls.map((finalVal, i) => {
       const s = sidesList[i] ?? sidesList[sidesList.length - 1] ?? 20;
-      const built = this.buildSlotReel(s, finalVal);
-      machine.appendChild(built.reel);
-      return built;
+      const b = this.buildDie(s, finalVal);
+      if (reduced) {
+        b.valueEl.textContent = finalVal;
+        b.die.classList.add('is-stopped');
+      }
+      tray.appendChild(b.die);
+      return b;
     });
-    stage.appendChild(machine);
+    stage.appendChild(tray);
+    this._currentDice = built;
 
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        this._slotReels.forEach(({ strip, targetY }, idx) => {
-          const delay = idx * timing.staggerMs;
-          const dur = timing.spinMs - delay * 0.35;
-          strip.style.transition = `transform ${dur}ms cubic-bezier(0.08, 0.82, 0.12, 1) ${delay}ms`;
-          strip.style.transform = `translateY(-${targetY}px)`;
-        });
+    if (reduced) return 0;
+
+    // Cycle random face values while spinning so the number looks alive too.
+    this._diceCycleInterval = setInterval(() => {
+      built.forEach((b) => {
+        if (b.die.classList.contains('is-stopped')) return;
+        const rand = Math.floor(Math.random() * b.sides) + 1;
+        b.valueEl.textContent = rand;
+        if (b.sides === 6) {
+          // Migotanie pipsów d6 (skoro pokazujemy je zamiast numeru)
+          const pipBox = b.die.querySelector('.cube-pips');
+          if (pipBox) pipBox.innerHTML = this._cubeDots(rand);
+        }
       });
-    });
+    }, 80);
 
+    const timing = this.getDiceAnimationTiming(rolls.length);
     return timing.totalMs;
   },
 
   stopDiceAnimation(rolls) {
-    clearTimeout(this._slotFinishTimer);
+    clearTimeout(this._diceFinishTimer);
+    clearInterval(this._diceCycleInterval);
+    this._diceCycleInterval = null;
+
     const stage = document.getElementById('dice-animation');
     if (!stage) return;
 
-    const machine = stage.querySelector('.slot-machine');
-    if (machine) machine.classList.remove('is-spinning');
+    const tray = stage.querySelector('.dice-tray');
+    if (tray) tray.classList.remove('is-spinning');
 
-    if (this._slotReels) {
-      this._slotReels.forEach(({ reel, strip, targetY, finalValue }, i) => {
-        strip.style.transition = 'none';
-        strip.style.transform = `translateY(-${targetY}px)`;
-        const lastItem = strip.querySelector('.slot-reel-item:last-child');
-        if (lastItem) lastItem.textContent = rolls[i] ?? finalValue ?? rolls[0];
-        reel.classList.add('is-stopped');
+    if (this._currentDice) {
+      this._currentDice.forEach((b, i) => {
+        const final = rolls[i] ?? b.finalValue;
+        b.valueEl.textContent = final;
+        if (b.sides === 6) {
+          const pipBox = b.die.querySelector('.cube-pips');
+          // Klamruj do 1-6 dla wyświetlenia pipsów
+          if (pipBox) pipBox.innerHTML = this._cubeDots(Math.max(1, Math.min(6, parseInt(final, 10) || 1)));
+        }
+        b.die.classList.add('is-stopped');
       });
     }
 
     stage.classList.remove('is-rolling');
-    this._slotFinishTimer = setTimeout(() => {
+    this._diceFinishTimer = setTimeout(() => {
       stage.innerHTML = '';
       stage.setAttribute('aria-hidden', 'true');
-      this._slotReels = null;
-    }, 650);
+      this._currentDice = null;
+    }, 1000);
+  },
+
+  // ===== Auto-switch do panelu kości na czas animacji =====
+  _pendingReturnTab: null,
+  _pendingReturnTimer: null,
+
+  isAutoSwitchEnabled() {
+    return localStorage.getItem('dice-auto-switch') !== 'off';
+  },
+
+  setAutoSwitch(enabled) {
+    localStorage.setItem('dice-auto-switch', enabled ? 'on' : 'off');
+  },
+
+  _shouldSkipAutoSwitch() {
+    // Nie przełączaj jeśli funkcja wyłączona
+    if (!this.isAutoSwitchEnabled()) return true;
+    // Nie przełączaj jeśli mapa w pełnym ekranie — wyrzuciłoby z fullscreena
+    if (document.fullscreenElement) return true;
+    // Nie przełączaj jeśli już jesteśmy na panelu kości
+    const active = document.querySelector('.session-tab.active');
+    if (active?.dataset?.panel === 'dice-panel') return true;
+    // Nie przełączaj jeśli sesja nie jest jeszcze widoczna (np. ekran logowania)
+    const sessionScreen = document.getElementById('campaign-session-screen');
+    if (sessionScreen && sessionScreen.classList.contains('hidden')) return true;
+    return false;
+  },
+
+  _maybeSwitchToDicePanel() {
+    // Anuluj oczekujący powrót — zaczynamy nowy rzut
+    clearTimeout(this._pendingReturnTimer);
+    this._pendingReturnTimer = null;
+
+    if (this._shouldSkipAutoSwitch()) return;
+
+    const active = document.querySelector('.session-tab.active');
+    // Zapamiętaj zakładkę powrotną tylko raz (łańcuch rzutów = wracamy do pierwszej)
+    if (!this._pendingReturnTab && active) {
+      this._pendingReturnTab = active;
+    }
+    const diceTab = document.querySelector('.session-tab[data-panel="dice-panel"]');
+    diceTab?.click();
+  },
+
+  _scheduleReturnToOriginalTab(delayMs = 2500) {
+    if (!this._pendingReturnTab) return;
+    clearTimeout(this._pendingReturnTimer);
+    const target = this._pendingReturnTab;
+    this._pendingReturnTimer = setTimeout(() => {
+      // Sprawdź czy w międzyczasie użytkownik nie zmienił panelu ręcznie
+      const stillOnDice = document.querySelector('.session-tab.active')?.dataset?.panel === 'dice-panel';
+      // Jeśli odszedł sam — uszanuj wybór
+      if (stillOnDice && target && document.body.contains(target)) {
+        target.click();
+      }
+      this._pendingReturnTab = null;
+      this._pendingReturnTimer = null;
+    }, delayMs);
+  },
+
+  cancelReturn() {
+    // Wywoływane gdy użytkownik świadomie zmienia panel — anulujemy pending return
+    clearTimeout(this._pendingReturnTimer);
+    this._pendingReturnTimer = null;
+    this._pendingReturnTab = null;
   },
 
   displayResult(expr, rolls, total, rollType, sides) {
     const resultEl = document.getElementById('dice-result-display');
     const textEl = document.getElementById('dice-result-text');
     if (!resultEl || !textEl) return;
+
+    // Auto-przełącz do panelu kości przed startem animacji
+    this._maybeSwitchToDicePanel();
 
     const sidesList = this.parseDieSidesFromRoll(expr, rolls, sides);
     const duration = this.startDiceAnimation(rolls, sidesList) || 0;
@@ -366,6 +475,9 @@ const Dice = {
         <div class="result-total">${total}</div>
         ${rollType ? `<div class="result-type">${escapeHtml(rollType)}</div>` : ''}
       `;
+
+      // Wróć do oryginalnego panelu po krótkim podglądzie wyniku
+      this._scheduleReturnToOriginalTab(2500);
     }, waitMs);
   },
 
@@ -614,13 +726,33 @@ const Dice = {
 
   showWeaponPicker(char, onPick) {
     const weapons = this.getCharacterWeapons(char);
-    const rows = weapons.map((w) => {
+    if (!weapons.length) {
+      showToast('Brak broni do wyboru — dodaj broń w karcie postaci', 'warning');
+      return;
+    }
+    const rows = weapons.map((w, idx) => {
       const wid = w.id || w.templateId || '';
       const atk = this.weaponAttackBonus(char, w);
       const dmg = this.weaponDamageBonus(char, w);
       const typeLabel = this.formatDamageType(w.damageType);
-      return `<button type="button" class="weapon-pick-btn" data-weapon-id="${escapeHtml(wid)}">
+      // Etykieta zasięgu (5e). Ranged → "🏹 150/600 ft", melee z reach → "⚔ 10 ft", thrown → "🪃 20/60 ft", melee → "⚔ 5 ft"
+      const props = w.properties || [];
+      const hasReach = props.includes('reach');
+      const isThrown = props.includes('thrown');
+      const hasRangeData = w.range && /\d/.test(w.range);
+      let rangeBadge;
+      if (hasRangeData && !isThrown) {
+        rangeBadge = `<span class="weapon-pick-range is-ranged">🏹 ${escapeHtml(w.range)} ft</span>`;
+      } else if (hasRangeData && isThrown) {
+        rangeBadge = `<span class="weapon-pick-range is-thrown">🪃 ${escapeHtml(w.range)} ft</span>`;
+      } else if (hasReach) {
+        rangeBadge = '<span class="weapon-pick-range is-melee">⚔ 10 ft (reach)</span>';
+      } else {
+        rangeBadge = '<span class="weapon-pick-range is-melee">⚔ 5 ft (wręcz)</span>';
+      }
+      return `<button type="button" class="weapon-pick-btn" data-weapon-id="${escapeHtml(wid)}" data-weapon-index="${idx}">
         <span class="weapon-pick-name">${escapeHtml(w.name)}</span>
+        ${rangeBadge}
         <span class="weapon-pick-meta">Atak ${modString(atk)} · ${escapeHtml(w.damage || '1d4')}${modString(dmg)} ${escapeHtml(typeLabel)}</span>
       </button>`;
     }).join('');
@@ -633,8 +765,13 @@ const Dice = {
     const body = document.getElementById('generic-modal-body');
     body.querySelectorAll('.weapon-pick-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
-        const weapon = Characters.getWeaponById(char, btn.dataset.weaponId);
-        if (!weapon) return;
+        const idx = parseInt(btn.dataset.weaponIndex, 10);
+        let weapon = Number.isInteger(idx) ? weapons[idx] : null;
+        if (!weapon) weapon = Characters.getWeaponById(char, btn.dataset.weaponId);
+        if (!weapon) {
+          showToast('Nie udało się odczytać tej broni — spróbuj odświeżyć stronę', 'error');
+          return;
+        }
         closeModal('generic-modal');
         onPick(weapon);
       });
@@ -643,11 +780,16 @@ const Dice = {
 
   executeWeaponAttack(char, weapon, options = {}) {
     const advantage = document.getElementById('dice-advantage')?.checked;
-    const disadvantage = document.getElementById('dice-disadvantage')?.checked;
+    const baseDisadvantage = document.getElementById('dice-disadvantage')?.checked;
+    const disadvantage = baseDisadvantage || !!options.forceDisadvantage;
     const isSecret = document.getElementById('dice-secret')?.checked;
 
-    const result = (advantage || disadvantage)
-      ? this.rollWeaponAttackAdv(char, weapon, disadvantage, isSecret, options.mapContext)
+    // Przewaga + utrudnienie się znoszą (5e RAW)
+    const useAdv = advantage && !disadvantage;
+    const useDis = disadvantage && !advantage;
+
+    const result = (useAdv || useDis)
+      ? this.rollWeaponAttackAdv(char, weapon, useDis, isSecret, options.mapContext)
       : this.rollWeaponAttack(char, weapon, isSecret, options.mapContext);
 
     this.showAttackFollowUp(char, weapon, result, isSecret, options);

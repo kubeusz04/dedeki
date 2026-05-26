@@ -43,9 +43,21 @@ const MapCombat = {
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         this.cancelTargeting();
+        this.hideActionWheel();
         if (typeof MapZones !== 'undefined') MapZones.cancelPlacement();
       }
     });
+
+    // Klik poza kołem akcji = zamyka koło
+    document.addEventListener('mousedown', (e) => {
+      if (!this._wheelOpen) return;
+      const wheel = document.getElementById('map-action-wheel');
+      if (wheel && !wheel.contains(e.target)) {
+        this.hideActionWheel();
+      }
+    }, true);
+
+    this.bindInitTrackClicks();
   },
 
   load() {
@@ -160,19 +172,26 @@ const MapCombat = {
     track.innerHTML = Initiative.entries.map((entry) => {
       const cls = entry.is_active ? 'map-order-chip active' : 'map-order-chip';
       const short = entry.entity_name.length > 8 ? `${entry.entity_name.slice(0, 7)}…` : entry.entity_name;
-      return `<span class="${cls}" title="${escapeHtml(entry.entity_name)}">${escapeHtml(short)}</span>`;
+      const tokId = entry.map_token_id || '';
+      return `<span class="${cls}" data-init-token="${escapeHtml(tokId)}" title="${escapeHtml(entry.entity_name)}">${escapeHtml(short)}</span>`;
     }).join('');
+
+    const activeChip = track.querySelector('.map-order-chip.active');
+    if (activeChip && this._lastActiveChip !== active?.id) {
+      activeChip.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+      this._lastActiveChip = active?.id;
+    }
 
     const activeTokenId = active?.map_token_id || '';
     const turn = activeTokenId ? this.getTurnState(activeTokenId) : null;
 
     if (status && active) {
-      let extra = '';
-      if (turn) {
-        extra = ` · Akcja: ${turn.actionUsed ? '✓' : '—'} · Bonus: ${turn.bonusUsed ? '✓' : '—'}`;
-      }
+      const extra = turn
+        ? ` · A:${turn.actionUsed ? '✓' : '—'} B:${turn.bonusUsed ? '✓' : '—'} R:${turn.reactionAvailable === false ? '✓' : '—'}`
+        : '';
       status.textContent = `Runda ${Initiative.round} — tura: ${active.entity_name}${extra}`;
     }
+    this.renderSelectedTokenStatus(activeTokenId);
 
     if (turn && meter && meterText && meterFill) {
       const remaining = (turn.movementRemainingFt ?? 0) + (turn.dashBonusFt ?? 0);
@@ -192,6 +211,60 @@ const MapCombat = {
     }
 
     if (endBtn) endBtn.disabled = !Initiative.canEndTurn();
+  },
+
+  renderSelectedTokenStatus(activeTokenId) {
+    const box = document.getElementById('map-selected-turn-info');
+    if (!box) return;
+    const selId = BattleMap.selectedTokenId;
+    if (!selId || selId === activeTokenId) {
+      box.classList.add('hidden');
+      box.innerHTML = '';
+      return;
+    }
+    const token = BattleMap.tokens.find((t) => t.id === selId);
+    if (!token) {
+      box.classList.add('hidden');
+      box.innerHTML = '';
+      return;
+    }
+    const turn = this.getTurnState(selId);
+    if (!turn) {
+      box.classList.add('hidden');
+      box.innerHTML = '';
+      return;
+    }
+    const remaining = (turn.movementRemainingFt ?? 0) + (turn.dashBonusFt ?? 0);
+    const max = turn.movementMaxFt ?? remaining;
+    const ratio = max > 0 ? remaining / max : 0;
+    const cells = MapTactics.feetToCells(remaining);
+    const name = escapeHtml(token.entity_name || '?');
+    box.classList.remove('hidden');
+    box.innerHTML = `
+      <span class="map-selected-name">👁 ${name}</span>
+      <span class="map-selected-mv" title="Ruch tej tury">🏃 ${remaining}/${max} ft (${cells})</span>
+      <span class="map-selected-mv-bar"><span style="width:${Math.round(Math.max(0, Math.min(1, ratio)) * 100)}%"></span></span>
+      <span class="map-selected-badges">
+        <span class="map-act-badge ${turn.actionUsed ? 'used' : 'free'}" title="Akcja">A</span>
+        <span class="map-act-badge ${turn.bonusUsed ? 'used' : 'free'}" title="Akcja dodatkowa">B</span>
+        <span class="map-act-badge ${turn.reactionAvailable === false ? 'used' : 'free'}" title="Reakcja">R</span>
+      </span>
+    `;
+  },
+
+  bindInitTrackClicks() {
+    if (this._initTrackBound) return;
+    this._initTrackBound = true;
+    const track = document.getElementById('map-init-order-track');
+    if (!track) return;
+    track.addEventListener('click', (e) => {
+      const chip = e.target.closest('[data-init-token]');
+      if (!chip) return;
+      const tid = chip.dataset.initToken;
+      if (!tid) return;
+      BattleMap.selectToken(tid);
+      BattleMap.focusToken?.(tid);
+    });
   },
 
   updateCombatSidebar() {
@@ -230,10 +303,30 @@ const MapCombat = {
       setDisabled('end', !Initiative.canEndTurn());
     }
 
+    // Pokaż imię tokena w centralnym medalionie
+    const label = document.getElementById('map-action-wheel-label');
+    if (label) {
+      const name = token.entity_name || token.name || 'Token';
+      label.textContent = name.length > 9 ? name.slice(0, 8) + '…' : name;
+      label.title = name;
+    }
+
     wheel.classList.remove('hidden');
-    const rect = BattleMap.viewport?.getBoundingClientRect() || { left: 0, top: 0 };
-    wheel.style.left = `${Math.min(rect.width - 120, Math.max(8, screenX - rect.left - 90))}px`;
-    wheel.style.top = `${Math.min(rect.height - 120, Math.max(8, screenY - rect.top - 90))}px`;
+    // Restart animacji popIn przy każdym otwarciu
+    wheel.style.animation = 'none';
+    void wheel.offsetWidth;
+    wheel.style.animation = '';
+
+    // Wheel ma 200x200, centrujemy na klikniętym punkcie
+    const WHEEL = 200;
+    const HALF = WHEEL / 2;
+    const rect = BattleMap.viewport?.getBoundingClientRect() || { left: 0, top: 0, width: 0, height: 0 };
+    const relX = screenX - rect.left - HALF;
+    const relY = screenY - rect.top - HALF;
+    const clampedX = Math.max(8, Math.min(rect.width - WHEEL - 8, relX));
+    const clampedY = Math.max(8, Math.min(rect.height - WHEEL - 8, relY));
+    wheel.style.left = `${clampedX}px`;
+    wheel.style.top = `${clampedY}px`;
   },
 
   hideActionWheel() {
@@ -324,7 +417,11 @@ const MapCombat = {
         characterId: char?.id
       };
       BattleMap.setTool('select');
-      showToast('Kliknij wroga w zasięgu', 'info');
+      const r = MapRange.weaponRangeCells(weapon);
+      const rangeHint = r.melee
+        ? `wręcz (${r.normalFt || 5} ft)`
+        : (r.long ? `${r.normalFt}/${r.longFt} ft — długi z utrudnieniem` : `${r.normalFt} ft`);
+      showToast(`⚔ ${weapon.name}: ${rangeHint}. Kliknij wroga w zasięgu`, 'info');
       BattleMap.render();
     };
     if (weapons.length === 1) pickWeapon(weapons[0]);
@@ -344,31 +441,280 @@ const MapCombat = {
       return;
     }
     this.targeting = { mode: 'spell', attackerTokenId: attackerToken.id, spell: null, characterId: char.id, spellList: combatSpells };
-    this.showSpellPicker(combatSpells, attackerToken);
+    this.showSpellPicker(combatSpells, attackerToken, char);
   },
 
-  showSpellPicker(spells, attackerToken) {
-    const rows = spells.slice(0, 12).map((s) =>
-      `<button type="button" class="btn btn-secondary btn-full map-spell-pick" data-spell-id="${escapeHtml(s.id)}">${escapeHtml(s.namePl || s.name)} <small>(${escapeHtml(s.range || '')})</small></button>`
-    ).join('');
-    showGenericModal('Wybierz czar', `<div class="map-spell-picks">${rows}</div>`);
+  _turnStateFor(tokenId) {
+    const cs = BattleMap.settings?.combat_state;
+    if (!cs) return null;
+    let st;
+    try { st = typeof cs === 'string' ? JSON.parse(cs) : cs; } catch (_e) { return null; }
+    return st?.tokens?.[tokenId] || null;
+  },
+
+  _spellAvailability(spell, char, attackerTokenId) {
+    const lvl = parseInt(spell.level, 10) || 0;
+    const hasSlot = lvl === 0 ? true : DndSpells.hasSlot(char, lvl);
+    const ctKind = DndSpells.getCastingTimeKind(spell);
+    const turn = this._turnStateFor(attackerTokenId);
+    const inCombat = !!turn;
+    let actionOk = true;
+    if (inCombat) {
+      if (ctKind === 'bonus') actionOk = !turn.bonusUsed;
+      else if (ctKind === 'reaction') actionOk = turn.reactionAvailable !== false;
+      else actionOk = !turn.actionUsed;
+    }
+    return { hasSlot, actionOk, ctKind, level: lvl };
+  },
+
+  showSpellPicker(spells, attackerToken, char) {
+    char = char || this.getCharacterForToken(attackerToken);
+    const remaining = char ? DndSpells.getRemainingSlots(char) : {};
+    const maxSlots = char ? DndSpells.getMaxSpellSlots(char.char_class, char.level) : {};
+
+    const slotsRow = Object.keys(maxSlots).length
+      ? `<div class="spell-picker-slots">${
+          Object.keys(maxSlots).sort().map((lv) =>
+            `<span class="slot-pill ${(remaining[lv] || 0) === 0 ? 'is-empty' : ''}" title="Sloty poziom ${lv}">${lv}: ${remaining[lv] || 0}/${maxSlots[lv]}</span>`
+          ).join('')
+        }</div>`
+      : '';
+
+    const rows = spells.slice(0, 16).map((s) => {
+      const av = this._spellAvailability(s, char, attackerToken.id);
+      const reason = !av.hasSlot ? 'Brak slotu' : (!av.actionOk ? 'Akcja zużyta' : '');
+      const disabled = !av.hasSlot || !av.actionOk;
+      const lvlBadge = av.level === 0
+        ? '<span class="spell-pick-lvl">C</span>'
+        : `<span class="spell-pick-lvl">${av.level}</span>`;
+      const kindIcon = av.ctKind === 'bonus' ? '⚡' : (av.ctKind === 'reaction' ? '↩' : '');
+      const aoe = DndSpells.parseAreaFromSpell(s);
+      const aoeIcon = aoe.aoeShape ? '🎯' : '';
+      return `<button type="button" class="btn ${disabled ? 'btn-secondary' : 'btn-primary'} btn-full map-spell-pick" data-spell-id="${escapeHtml(s.id)}" ${disabled ? `disabled title="${escapeHtml(reason)}"` : ''}>
+        ${lvlBadge} ${escapeHtml(s.namePl || s.name)} ${kindIcon}${aoeIcon}
+        <small>(${escapeHtml(s.range || '')}${s.damage ? ' · ' + escapeHtml(s.damage) : ''})</small>
+      </button>`;
+    }).join('');
+
+    showGenericModal('Wybierz czar', `${slotsRow}<div class="map-spell-picks">${rows}</div>`);
     document.querySelectorAll('.map-spell-pick').forEach((btn) => {
       btn.addEventListener('click', () => {
         const spell = spells.find((s) => s.id === btn.dataset.spellId);
         closeModal('generic-modal');
         if (!spell) return;
         const area = DndSpells.parseAreaFromSpell(spell);
-        if (area.aoeShape && BattleMap.isDm()) {
+        const canPlaceAoe = BattleMap.isDm()
+          || this.getCharacterForToken(attackerToken)?.user_id === App.user?.id;
+        if (area.aoeShape && canPlaceAoe) {
           closeModal('generic-modal');
           MapZones.startSpellPlacement(spell, attackerToken.id);
           this.cancelTargeting();
           return;
         }
         this.targeting = { mode: 'spell', attackerTokenId: attackerToken.id, spell, characterId: this.getCharacterForToken(attackerToken)?.id };
-        showToast('Kliknij cel w zasięgu', 'info');
+        const rs = MapRange.spellRangeCells(spell);
+        const rangeHint = rs.melee
+          ? (rs.normal === 0 ? 'na siebie' : `dotyk (${rs.normalFt || 5} ft)`)
+          : `${rs.normalFt || (rs.normal * 5)} ft`;
+        showToast(`🪄 ${spell.namePl || spell.name}: ${rangeHint}. Kliknij cel`, 'info');
         BattleMap.render();
       });
     });
+  },
+
+  onAooTrigger(data) {
+    if (App.currentCampaign?.role !== 'dm') return;
+    if (!data?.attackerTokenId) return;
+    this._aooQueue = this._aooQueue || [];
+    this._aooQueue.push(data);
+    if (!this._aooActive) this._showNextAoo();
+  },
+
+  onAooReactionResult(data) {
+    if (data?.ok) showToast('Reakcja zużyta', 'info');
+    else if (data?.reason === 'no_reaction') showToast('Token nie miał już reakcji', 'warning');
+  },
+
+  _showNextAoo() {
+    if (!this._aooQueue?.length) {
+      this._aooActive = false;
+      return;
+    }
+    this._aooActive = true;
+    const data = this._aooQueue.shift();
+    const attacker = BattleMap.tokens.find((t) => t.id === data.attackerTokenId);
+    const target = BattleMap.tokens.find((t) => t.id === data.targetTokenId);
+    const attackerChar = attacker ? this.getCharacterForToken(attacker) : null;
+
+    let defaultBonus = 0;
+    let defaultDamage = '1d6';
+    let defaultName = data.attackerName || 'Stwór';
+
+    if (attackerChar) {
+      const weapons = Dice.getCharacterWeapons(attackerChar);
+      const melee = weapons.find((w) => !(w.properties || []).includes('ranged')) || weapons[0];
+      if (melee) {
+        defaultBonus = Dice.weaponAttackBonus(attackerChar, melee);
+        const dmgBonus = Dice.weaponDamageBonus(attackerChar, melee);
+        defaultDamage = `${melee.damage || '1d6'}${dmgBonus ? (dmgBonus >= 0 ? '+' : '') + dmgBonus : ''}`;
+        defaultName = melee.name;
+      }
+    } else if (attacker?.stat_notes) {
+      const m = attacker.stat_notes.match(/atak[:\s]*\+?(\-?\d+)/i);
+      if (m) defaultBonus = parseInt(m[1], 10) || 0;
+      const dm = attacker.stat_notes.match(/dmg[:\s]*([0-9d+\- ]+)/i);
+      if (dm) defaultDamage = dm[1].trim() || '1d6';
+    }
+
+    const body = `
+      <p class="info-text"><strong>${escapeHtml(data.attackerName)}</strong> dostaje atak okazyjny na uciekającego <strong>${escapeHtml(data.targetName)}</strong>.</p>
+      <p class="sheet-hint">Cel wyszedł z zasięgu 5 ft. Atakuj jedną bronią walki w zwarciu (kosztem reakcji) lub pomiń.</p>
+      <div class="aoo-form">
+        <label>Broń / nazwa
+          <input type="text" id="aoo-weapon-name" class="input-sm" value="${escapeHtml(defaultName)}">
+        </label>
+        <label>Modyfikator ataku
+          <input type="number" id="aoo-attack-bonus" class="input-sm" value="${defaultBonus}">
+        </label>
+        <label>Obrażenia (kości)
+          <input type="text" id="aoo-damage" class="input-sm" value="${escapeHtml(defaultDamage)}" placeholder="1d8+3">
+        </label>
+        <label class="aoo-flags">
+          <input type="checkbox" id="aoo-advantage"> Przewaga
+          <input type="checkbox" id="aoo-disadvantage"> Utrudnienie
+        </label>
+      </div>
+      <div class="aoo-actions">
+        <button type="button" id="btn-aoo-roll" class="btn btn-primary">🎲 Rzuć atak okazyjny</button>
+        <button type="button" id="btn-aoo-skip" class="btn btn-secondary">Pomiń</button>
+      </div>
+    `;
+    showGenericModal('⚔ Atak okazyjny!', body);
+
+    const cleanup = () => {
+      closeModal('generic-modal');
+      this._aooActive = false;
+      setTimeout(() => this._showNextAoo(), 50);
+    };
+
+    document.getElementById('btn-aoo-skip')?.addEventListener('click', cleanup);
+    document.getElementById('btn-aoo-roll')?.addEventListener('click', () => {
+      const wname = document.getElementById('aoo-weapon-name')?.value || 'AoO';
+      const bonus = parseInt(document.getElementById('aoo-attack-bonus')?.value, 10) || 0;
+      const dmgExpr = document.getElementById('aoo-damage')?.value?.trim() || '1d6';
+      const adv = document.getElementById('aoo-advantage')?.checked;
+      const dis = document.getElementById('aoo-disadvantage')?.checked;
+      this._resolveAoo({
+        attackerTokenId: data.attackerTokenId,
+        targetTokenId: data.targetTokenId,
+        attackerName: data.attackerName,
+        targetName: data.targetName,
+        weaponName: wname,
+        attackBonus: bonus,
+        damageExpr: dmgExpr,
+        advantage: adv,
+        disadvantage: dis,
+      });
+      cleanup();
+    });
+  },
+
+  _rollD20() {
+    return Math.floor(Math.random() * 20) + 1;
+  },
+
+  _rollExpr(expr) {
+    let total = 0;
+    const detail = [];
+    const tokens = expr.replace(/\s+/g, '').match(/([+\-]?\d*d\d+|[+\-]?\d+)/gi) || [];
+    for (const t of tokens) {
+      const sign = t.startsWith('-') ? -1 : 1;
+      const body = t.replace(/^[+\-]/, '');
+      const m = body.match(/^(\d*)d(\d+)$/i);
+      if (m) {
+        const n = parseInt(m[1] || '1', 10);
+        const sides = parseInt(m[2], 10);
+        let sub = 0;
+        const rolls = [];
+        for (let i = 0; i < n; i++) {
+          const r = Math.floor(Math.random() * sides) + 1;
+          rolls.push(r);
+          sub += r;
+        }
+        total += sign * sub;
+        detail.push(`${sign < 0 ? '-' : ''}${n}d${sides}[${rolls.join(',')}]`);
+      } else {
+        const n = parseInt(body, 10) || 0;
+        total += sign * n;
+        detail.push(`${sign < 0 ? '-' : '+'}${n}`);
+      }
+    }
+    return { total: Math.max(0, total), detail: detail.join(' ') };
+  },
+
+  _resolveAoo(opts) {
+    const r1 = this._rollD20();
+    const r2 = this._rollD20();
+    let attackRoll;
+    let rollLabel;
+    if (opts.advantage && !opts.disadvantage) {
+      attackRoll = Math.max(r1, r2);
+      rollLabel = `${r1}/${r2}→${attackRoll} (Przewaga)`;
+    } else if (opts.disadvantage && !opts.advantage) {
+      attackRoll = Math.min(r1, r2);
+      rollLabel = `${r1}/${r2}→${attackRoll} (Utrudnienie)`;
+    } else {
+      attackRoll = r1;
+      rollLabel = `${r1}`;
+    }
+    const isCrit = attackRoll === 20;
+    const isFumble = attackRoll === 1;
+    const atkTotal = attackRoll + opts.attackBonus;
+
+    let dmg = { total: 0, detail: '' };
+    if (!isFumble) {
+      dmg = this._rollExpr(opts.damageExpr);
+      if (isCrit) {
+        const extra = this._rollExpr(opts.damageExpr.replace(/([+\-]\d+)$/, ''));
+        dmg.total += extra.total;
+        dmg.detail += ` + KRYT(${extra.detail})`;
+      }
+    }
+
+    const bonusStr = `${opts.attackBonus >= 0 ? '+' : ''}${opts.attackBonus}`;
+    const atkExpr = `1d20${bonusStr} (AoO: ${opts.weaponName} → ${opts.targetName})`;
+    App.socket?.emit('dice-roll', {
+      expression: atkExpr,
+      rolls: opts.advantage || opts.disadvantage ? [r1, r2] : [r1],
+      total: atkTotal,
+      rollType: isFumble ? 'PUDŁO' : (isCrit ? 'KRYT' : 'AoO'),
+      characterName: opts.attackerName,
+    });
+
+    if (!isFumble && dmg.total > 0) {
+      App.socket?.emit('dice-roll', {
+        expression: `${opts.damageExpr}${isCrit ? ' KRYT' : ''} (obrażenia AoO → ${opts.targetName})`,
+        rolls: [dmg.total],
+        total: dmg.total,
+        rollType: 'AoO obrażenia',
+        characterName: opts.attackerName,
+      });
+    }
+
+    const toastMsg = isFumble
+      ? `⚔ AoO ${opts.attackerName} → ${opts.targetName}: PUDŁO (1)!`
+      : `⚔ AoO ${opts.attackerName} → ${opts.targetName}: atak ${atkTotal}${isCrit ? ' KRYT!' : ''}, obrażenia ${dmg.total}`;
+    showToast(toastMsg, isFumble ? 'warning' : 'info');
+
+    App.socket?.emit('combat-aoo-spend-reaction', { attackerTokenId: opts.attackerTokenId });
+
+    if (!isFumble && dmg.total > 0) {
+      App.socket?.emit('combat-apply-damage', {
+        attackerTokenId: opts.attackerTokenId,
+        targetTokenId: opts.targetTokenId,
+        amount: dmg.total,
+      });
+    }
   },
 
   startAttackFromSidebar() {
@@ -401,20 +747,23 @@ const MapCombat = {
     const char = this.getCharacterForToken(token);
     let spells = [];
     if (char && typeof DndSpells !== 'undefined') {
+      // Tylko czary, które postać zna i które mają obszar
       spells = DndSpells.parseSpellsKnown(char).filter((s) => {
         const a = DndSpells.parseAreaFromSpell(s);
         return a.aoeShape && (s.attackType === 'save' || s.damage);
       });
     }
-    if (!spells.length && typeof DndSpells !== 'undefined') {
+    // Fallback dla MG sterujących NPC bez karty postaci: wybór z katalogu
+    // (NPC nie ma slotów/akcji w sensie 5e — serwer pominie walidację)
+    if (!spells.length && BattleMap.isDm() && typeof DndSpells !== 'undefined') {
       spells = DndSpells.SPELL_TEMPLATES.filter((t) => t.aoeShape && t.attackType === 'save')
         .map((t) => DndSpells.spellFromTemplate(t.id));
     }
     if (!spells.length) {
-      showToast('Brak czarów obszarowych', 'warning');
+      showToast(char ? 'Brak czarów obszarowych na karcie postaci' : 'Brak czarów obszarowych', 'warning');
       return;
     }
-    this.showSpellPicker(spells, token);
+    this.showSpellPicker(spells, token, char);
   },
 
   cancelTargeting() {
@@ -475,10 +824,16 @@ const MapCombat = {
       targetName: targetToken?.entity_name
     };
 
+    // 5e: w długim zasięgu broni dystansowej atak ma utrudnienie
+    const longRange = data?.rangeCheck?.band === 'long';
+    if (longRange) {
+      showToast('Długi zasięg — atak z utrudnieniem', 'warning');
+    }
+
     if (this.targeting.mode === 'attack') {
       const char = this.getCharacterForToken(attacker);
       if (char && this.targeting.weapon) {
-        Dice.executeWeaponAttack(char, this.targeting.weapon, { mapContext: ctx });
+        Dice.executeWeaponAttack(char, this.targeting.weapon, { mapContext: ctx, forceDisadvantage: longRange });
       }
     } else if (this.targeting.mode === 'spell' && this.targeting.spell) {
       const char = this.getCharacterForToken(attacker);
@@ -572,27 +927,80 @@ const MapCombat = {
   _drawAttackRange(ctx, gs) {
     const attacker = BattleMap.tokens.find((t) => t.id === this.targeting.attackerTokenId);
     if (!attacker) return;
-    let rangeCells = 1;
+
+    let normalCells = 1;
+    let longCells = 0;
+    let isMelee = true;
     if (this.targeting.weapon) {
-      rangeCells = MapRange.weaponRangeCells(this.targeting.weapon).normal;
-      const long = MapRange.weaponRangeCells(this.targeting.weapon).long;
-      if (long) rangeCells = long;
+      const r = MapRange.weaponRangeCells(this.targeting.weapon);
+      normalCells = r.normal || 1;
+      longCells = r.long || 0;
+      isMelee = !!r.melee;
     } else if (this.targeting.spell) {
-      rangeCells = MapRange.spellRangeCells(this.targeting.spell).normal || 6;
+      const r = MapRange.spellRangeCells(this.targeting.spell);
+      normalCells = r.normal || 6;
+      longCells = 0;
+      isMelee = !!r.melee;
     }
+
+    // Klamruj zasięg do rozmiarów siatki — ranged weapons w 5e mogą mieć 600ft = 120 kratek,
+    // a rysowanie 241x241 = 58k komórek per frame zawiesza przeglądarkę.
+    const gw = BattleMap.settings?.grid_width || 25;
+    const gh = BattleMap.settings?.grid_height || 18;
+    const maxDim = Math.max(gw, gh);
+    const drawNormal = Math.min(normalCells, maxDim);
+    const drawLong = longCells ? Math.min(longCells, maxDim) : 0;
+    const drawMax = Math.max(drawNormal, drawLong);
+
     const anchor = MapTactics.tokenAnchor(attacker);
+    const minX = Math.max(0, anchor.x - drawMax);
+    const maxX = Math.min(gw - 1, anchor.x + drawMax);
+    const minY = Math.max(0, anchor.y - drawMax);
+    const maxY = Math.min(gh - 1, anchor.y + drawMax);
+
     ctx.save();
-    ctx.fillStyle = 'rgba(201, 162, 39, 0.12)';
-    ctx.strokeStyle = 'rgba(201, 162, 39, 0.35)';
-    for (let dy = -rangeCells; dy <= rangeCells; dy++) {
-      for (let dx = -rangeCells; dx <= rangeCells; dx++) {
-        if (Math.max(Math.abs(dx), Math.abs(dy)) > rangeCells) continue;
-        const x = anchor.x + dx;
-        const y = anchor.y + dy;
+    // 5e: w długim zasięgu atakujesz z utrudnieniem → inny kolor
+    const normalFill = isMelee ? 'rgba(166, 61, 47, 0.18)' : 'rgba(70, 200, 120, 0.16)';
+    const normalStroke = isMelee ? 'rgba(166, 61, 47, 0.45)' : 'rgba(70, 200, 120, 0.5)';
+    const longFill = 'rgba(220, 170, 70, 0.10)';
+    const longStroke = 'rgba(220, 170, 70, 0.35)';
+
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        const dx = Math.abs(x - anchor.x);
+        const dy = Math.abs(y - anchor.y);
+        const d = Math.max(dx, dy);
+        if (d === 0) continue;
+        if (d <= drawNormal) {
+          ctx.fillStyle = normalFill;
+          ctx.strokeStyle = normalStroke;
+        } else if (d <= drawLong) {
+          ctx.fillStyle = longFill;
+          ctx.strokeStyle = longStroke;
+        } else {
+          continue;
+        }
         ctx.fillRect(x * gs, y * gs, gs, gs);
         ctx.strokeRect(x * gs + 0.5, y * gs + 0.5, gs - 1, gs - 1);
       }
     }
+
+    // Podświetl wrogie tokeny w zasięgu (zielony obrys w normalnym, żółty w długim)
+    BattleMap.tokens.forEach((t) => {
+      if (t.id === attacker.id) return;
+      const ta = MapTactics.tokenAnchor(t);
+      const dx = Math.abs(ta.x - anchor.x);
+      const dy = Math.abs(ta.y - anchor.y);
+      const d = Math.max(dx, dy);
+      if (d > drawLong && d > drawNormal) return;
+      const inLong = drawLong && d > drawNormal && d <= drawLong;
+      ctx.strokeStyle = inLong ? 'rgba(255, 210, 80, 0.95)' : 'rgba(80, 220, 120, 0.95)';
+      ctx.lineWidth = 3;
+      const size = (t.size || 1) * gs;
+      ctx.beginPath();
+      ctx.arc(t.x * gs + size / 2, t.y * gs + size / 2, size * 0.55, 0, Math.PI * 2);
+      ctx.stroke();
+    });
     ctx.restore();
   },
 

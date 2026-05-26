@@ -5,6 +5,7 @@ const { v4: uuidv4 } = require('uuid');
 const MapTactics = require('./public/js/map-tactics.js');
 const MapPropTemplates = require('./public/js/map-prop-templates.js');
 const MapProps = require('./public/js/map-props.js');
+const DndSpells = require('./public/js/dnd5e-spells.js');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -403,6 +404,28 @@ async function runMigrations() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
     )`,
+    `CREATE TABLE IF NOT EXISTS token_images (
+      id TEXT PRIMARY KEY,
+      campaign_id TEXT NOT NULL,
+      name TEXT DEFAULT '',
+      image_url TEXT NOT NULL,
+      category TEXT DEFAULT 'character',
+      uploaded_by TEXT DEFAULT '',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
+    )`,
+    `CREATE TABLE IF NOT EXISTS custom_items (
+      id TEXT PRIMARY KEY,
+      campaign_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      category TEXT DEFAULT 'gear',
+      weight REAL DEFAULT 0,
+      price_copper INTEGER DEFAULT 0,
+      description TEXT DEFAULT '',
+      data TEXT DEFAULT '{}',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
+    )`,
     `CREATE TABLE IF NOT EXISTS loot_grants (
       id TEXT PRIMARY KEY,
       campaign_id TEXT NOT NULL,
@@ -448,11 +471,11 @@ async function runMigrations() {
 const economyLib = {
   COIN_CP: { copper: 1, silver: 10, electrum: 50, gold: 100, platinum: 1000 },
 
-  parseJson(val) {
-    if (!val) return [];
-    if (Array.isArray(val)) return val;
-    if (typeof val === 'object') return val;
-    try { return JSON.parse(val); } catch { return []; }
+  parseJson(val, defaultVal) {
+    const fallback = defaultVal !== undefined ? defaultVal : [];
+    if (!val) return fallback;
+    if (Array.isArray(val) || typeof val === 'object') return val;
+    try { return JSON.parse(val); } catch { return fallback; }
   },
 
   normalizeEquipment(raw) {
@@ -762,6 +785,79 @@ const characterOps = {
 
   async delete(id, userId) {
     await query('DELETE FROM characters WHERE id = $1 AND user_id = $2', [id, userId]);
+  },
+
+  async consumeSpellSlot(characterId, slotLevel) {
+    const char = await this.findById(characterId);
+    if (!char) return { ok: false, reason: 'no_character' };
+    const updated = DndSpells.consumeSlot(char, slotLevel);
+    if (!updated) return { ok: false, reason: 'no_slot' };
+    await query(
+      'UPDATE characters SET spell_slots = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      [JSON.stringify(updated), characterId]
+    );
+    return { ok: true, spellSlots: updated };
+  },
+
+  async setSpellSlots(characterId, slotsState) {
+    await query(
+      'UPDATE characters SET spell_slots = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      [JSON.stringify(slotsState || { used: {} }), characterId]
+    );
+    return this.findById(characterId);
+  },
+
+  async longRest(characterId) {
+    const char = await this.findById(characterId);
+    if (!char) return null;
+    const max = parseInt(char.max_hp, 10) || 1;
+    const hd = parseInt(char.hit_dice, 10) || 1;
+    const remainingHd = parseInt(char.hit_dice_remaining, 10) || 0;
+    const restoredHd = Math.min(hd, remainingHd + Math.max(1, Math.floor(hd / 2)));
+    await query(
+      `UPDATE characters SET
+         current_hp = $1,
+         temp_hp = 0,
+         spell_slots = $2,
+         hit_dice_remaining = $3,
+         death_save_successes = 0,
+         death_save_failures = 0,
+         updated_at = CURRENT_TIMESTAMP
+       WHERE id = $4`,
+      [max, JSON.stringify({ used: {} }), restoredHd, characterId]
+    );
+    return this.findById(characterId);
+  },
+
+  async shortRest(characterId, spentHitDice) {
+    const char = await this.findById(characterId);
+    if (!char) return null;
+    const max = parseInt(char.max_hp, 10) || 1;
+    const cur = parseInt(char.current_hp, 10) || 0;
+    const conMod = Math.floor(((parseInt(char.constitution, 10) || 10) - 10) / 2);
+    const remaining = parseInt(char.hit_dice_remaining, 10) || 0;
+    const spend = Math.max(0, Math.min(remaining, parseInt(spentHitDice, 10) || 0));
+    let healed = 0;
+    for (let i = 0; i < spend; i++) {
+      const roll = 1 + Math.floor(Math.random() * 8); // d8 fallback; jeśli hit die jest inny, gracz może edytować
+      healed += Math.max(1, roll + conMod);
+    }
+    const newHp = Math.min(max, cur + healed);
+    // Warlock-only: krótki odpoczynek odnawia slot
+    let newSlots = char.spell_slots;
+    if (char.char_class === 'Warlock') {
+      newSlots = JSON.stringify({ used: {} });
+    }
+    await query(
+      `UPDATE characters SET
+         current_hp = $1,
+         hit_dice_remaining = $2,
+         spell_slots = $3,
+         updated_at = CURRENT_TIMESTAMP
+       WHERE id = $4`,
+      [newHp, remaining - spend, newSlots, characterId]
+    );
+    return { character: await this.findById(characterId), healed, hitDiceSpent: spend };
   },
 
   exportCharacter(character) {
@@ -1579,7 +1675,8 @@ function defaultTokenTurnState(speedFt, x, y) {
     bonusUsed: false,
     reactionAvailable: true,
     freeInteractionUsed: false,
-    dashBonusFt: 0
+    dashBonusFt: 0,
+    hazardsTriggered: []
   };
 }
 
@@ -1800,6 +1897,199 @@ const combatOps = {
     }
     await mapOps.moveToken(tokenId, newX, newY);
     return state;
+  },
+
+  async resolveHazardsForMove(campaignId, tokenId, fromX, fromY, toX, toY) {
+    const token = await mapOps.getTokenById(tokenId);
+    if (!token) return [];
+    const settings = await mapOps.getSettings(campaignId);
+    const zones = MapTactics.parseZonesList(settings?.map_zones || '[]');
+    const hazardIndex = MapTactics.buildHazardIndex(zones);
+    if (!hazardIndex.size) return [];
+
+    const touched = MapTactics.hazardsTouchedByMove(token, fromX, fromY, toX, toY, hazardIndex);
+    if (!touched.length) return [];
+
+    const state = this.parseCombatState(settings);
+    const turn = state.tokens[tokenId];
+    const triggered = new Set(turn?.hazardsTriggered || []);
+    const newHits = touched.filter((h) => !triggered.has(h.terrainType));
+    if (!newHits.length) return [];
+
+    const results = [];
+    for (const hazard of newHits) {
+      const roll = this._rollDamageExpr(hazard.damage);
+      if (roll.total > 0) {
+        await this.applyDamageToToken(tokenId, roll.total, campaignId);
+      }
+      triggered.add(hazard.terrainType);
+      results.push({
+        tokenId,
+        tokenName: token.entity_name || 'Token',
+        terrainType: hazard.terrainType,
+        label: hazard.label,
+        icon: hazard.icon || '⚠️',
+        damage: hazard.damage,
+        damageType: hazard.damageType,
+        amount: roll.total,
+        rolls: roll.rolls,
+        kind: 'move'
+      });
+    }
+
+    if (turn) {
+      turn.hazardsTriggered = Array.from(triggered);
+      state.tokens[tokenId] = turn;
+      await this.saveCombatState(campaignId, state);
+    }
+    return results;
+  },
+
+  async resolveHazardsForTurnStart(campaignId, tokenId) {
+    const token = await mapOps.getTokenById(tokenId);
+    if (!token) return [];
+    const settings = await mapOps.getSettings(campaignId);
+    const zones = MapTactics.parseZonesList(settings?.map_zones || '[]');
+    const hazardIndex = MapTactics.buildHazardIndex(zones);
+    if (!hazardIndex.size) return [];
+
+    const size = parseInt(token.size, 10) || 1;
+    const hazardsHere = [];
+    const seen = new Set();
+    for (let dy = 0; dy < size; dy++) {
+      for (let dx = 0; dx < size; dx++) {
+        const hs = MapTactics.hazardsAtCell(hazardIndex, token.x + dx, token.y + dy);
+        for (const h of hs) {
+          if (seen.has(h.terrainType)) continue;
+          seen.add(h.terrainType);
+          hazardsHere.push(h);
+        }
+      }
+    }
+    if (!hazardsHere.length) return [];
+
+    const state = this.parseCombatState(settings);
+    let turn = state.tokens[tokenId];
+    if (!turn) {
+      const speed = await this.getSpeedForToken(token);
+      turn = defaultTokenTurnState(speed, token.x, token.y);
+      state.tokens[tokenId] = turn;
+    }
+    turn.hazardsTriggered = turn.hazardsTriggered || [];
+
+    const results = [];
+    for (const hazard of hazardsHere) {
+      const roll = this._rollDamageExpr(hazard.damage);
+      if (roll.total > 0) {
+        await this.applyDamageToToken(tokenId, roll.total, campaignId);
+      }
+      if (!turn.hazardsTriggered.includes(hazard.terrainType)) {
+        turn.hazardsTriggered.push(hazard.terrainType);
+      }
+      results.push({
+        tokenId,
+        tokenName: token.entity_name || 'Token',
+        terrainType: hazard.terrainType,
+        label: hazard.label,
+        icon: hazard.icon || '⚠️',
+        damage: hazard.damage,
+        damageType: hazard.damageType,
+        amount: roll.total,
+        rolls: roll.rolls,
+        kind: 'turn_start'
+      });
+    }
+    state.tokens[tokenId] = turn;
+    await this.saveCombatState(campaignId, state);
+    return results;
+  },
+
+  _factionOf(token) {
+    if (!token) return 'unknown';
+    if (token.entity_type === 'prop') return 'prop';
+    if (token.entity_type === 'player') return 'player';
+    return 'monster';
+  },
+
+  _isHostileTo(a, b) {
+    const fa = this._factionOf(a);
+    const fb = this._factionOf(b);
+    if (fa === 'prop' || fb === 'prop' || fa === 'unknown' || fb === 'unknown') return false;
+    return fa !== fb;
+  },
+
+  _chebyshevBetweenTokens(a, b) {
+    const sizeA = parseInt(a.size, 10) || 1;
+    const sizeB = parseInt(b.size, 10) || 1;
+    const ax1 = a.x, ay1 = a.y, ax2 = a.x + sizeA - 1, ay2 = a.y + sizeA - 1;
+    const bx1 = b.x, by1 = b.y, bx2 = b.x + sizeB - 1, by2 = b.y + sizeB - 1;
+    const dx = Math.max(0, Math.max(bx1 - ax2, ax1 - bx2));
+    const dy = Math.max(0, Math.max(by1 - ay2, ay1 - by2));
+    return Math.max(dx, dy);
+  },
+
+  _chebyshevPosToToken(x, y, size, target) {
+    const sizeT = parseInt(target.size, 10) || 1;
+    const ax2 = x + (size - 1), ay2 = y + (size - 1);
+    const bx1 = target.x, by1 = target.y, bx2 = target.x + sizeT - 1, by2 = target.y + sizeT - 1;
+    const dx = Math.max(0, Math.max(bx1 - ax2, x - bx2));
+    const dy = Math.max(0, Math.max(by1 - ay2, y - by2));
+    return Math.max(dx, dy);
+  },
+
+  async detectOpportunityAttacks(campaignId, tokenId, oldX, oldY, newX, newY) {
+    const moverToken = await mapOps.getTokenById(tokenId);
+    if (!moverToken) return [];
+    if (oldX === newX && oldY === newY) return [];
+
+    const allTokens = await mapOps.getTokens(campaignId);
+    const settings = await mapOps.getSettings(campaignId);
+    const state = this.parseCombatState(settings);
+    const moverSize = parseInt(moverToken.size, 10) || 1;
+    const triggers = [];
+
+    for (const other of allTokens) {
+      if (other.id === tokenId) continue;
+      if (!this._isHostileTo(moverToken, other)) continue;
+      if ((parseInt(other.current_hp, 10) || 0) <= 0 && other.entity_type !== 'player') continue;
+
+      const wasAdjacent = this._chebyshevPosToToken(oldX, oldY, moverSize, other) <= 1;
+      const stillAdjacent = this._chebyshevPosToToken(newX, newY, moverSize, other) <= 1;
+      if (!wasAdjacent || stillAdjacent) continue;
+
+      const otherTurn = state.tokens[other.id];
+      const hasReaction = !otherTurn || otherTurn.reactionAvailable !== false;
+      if (!hasReaction) continue;
+
+      triggers.push({
+        attackerTokenId: other.id,
+        attackerName: other.entity_name || 'Stwór',
+        targetTokenId: tokenId,
+        targetName: moverToken.entity_name || 'Cel',
+        fromX: oldX,
+        fromY: oldY,
+        toX: newX,
+        toY: newY,
+      });
+    }
+    return triggers;
+  },
+
+  async spendReaction(campaignId, tokenId) {
+    const settings = await mapOps.getSettings(campaignId);
+    const state = this.parseCombatState(settings);
+    const token = await mapOps.getTokenById(tokenId);
+    if (!token) return { ok: false, reason: 'no_token' };
+    let turn = state.tokens[tokenId];
+    if (!turn) {
+      const speed = await this.getSpeedForToken(token);
+      turn = defaultTokenTurnState(speed, token.x, token.y);
+    }
+    if (turn.reactionAvailable === false) return { ok: false, reason: 'no_reaction' };
+    turn.reactionAvailable = false;
+    state.tokens[tokenId] = turn;
+    await this.saveCombatState(campaignId, state);
+    return { ok: true };
   },
 
   async spendAction(campaignId, tokenId, type = 'action') {
@@ -2068,7 +2358,7 @@ const combatOps = {
   },
 
   async resolveAoeSpell(campaignId, userId, username, data) {
-    const { zone, spell, casterTokenId } = data || {};
+    const { zone, spell, casterTokenId, slotLevel: requestedSlotLevel, isDm } = data || {};
     if (!zone || !spell || !casterTokenId) return { ok: false, reason: 'bad_payload' };
 
     const settings = await mapOps.getSettings(campaignId);
@@ -2078,6 +2368,56 @@ const combatOps = {
     const tokens = await mapOps.getTokens(campaignId);
     const caster = tokens.find((t) => t.id === casterTokenId);
     if (!caster) return { ok: false, reason: 'no_caster' };
+
+    // ===== Wymóg 5e: akcja + slot dla postaci graczy =====
+    // MG sterowani NPC nie mają karty / spell slotów — wówczas walidujemy tylko akcję
+    // (a bossy z bardem-encounter mogą dostać free pass jeśli flag isDm=true z UI).
+    const casterChar = caster.entity_type === 'player' && caster.entity_id
+      ? await characterOps.findById(caster.entity_id)
+      : null;
+    const spellLevel = parseInt(spell.level, 10) || 0;
+    const slotLevel = Math.max(spellLevel, parseInt(requestedSlotLevel, 10) || spellLevel);
+    let pendingSlotState = null;
+
+    if (casterChar) {
+      // 1. Czy postać zna ten czar
+      const known = DndSpells.parseSpellsKnown(casterChar);
+      const knownIds = new Set(known.map((s) => s.templateId || s.id));
+      const tplId = spell.templateId || spell.id;
+      if (tplId && !knownIds.has(tplId) && !known.some((s) => (s.namePl || s.name) === (spell.namePl || spell.name))) {
+        return { ok: false, reason: 'spell_not_known' };
+      }
+      // 2. Czy ma slot (cantripy zawsze OK). Faktyczny zapis odbędzie się po walidacji akcji.
+      if (spellLevel > 0) {
+        const updatedSlots = DndSpells.consumeSlot(casterChar, slotLevel);
+        if (!updatedSlots) return { ok: false, reason: 'no_slot' };
+        pendingSlotState = updatedSlots;
+      }
+    }
+
+    // 3. Akcja / akcja dodatkowa (sprawdzamy dla każdego tokena uczestniczącego w walce)
+    const ctKind = DndSpells.getCastingTimeKind(spell);
+    const combatActive = settings?.combat_active && (this.parseCombatState(settings)?.tokens?.[casterTokenId]);
+    if (combatActive && !isDm) {
+      if (ctKind === 'bonus') {
+        const spend = await this.spendAction(campaignId, casterTokenId, 'bonus');
+        if (!spend.ok) return { ok: false, reason: spend.reason };
+      } else if (ctKind === 'action' || ctKind === 'long') {
+        const spend = await this.spendAction(campaignId, casterTokenId, 'action');
+        if (!spend.ok) return { ok: false, reason: spend.reason };
+      } else if (ctKind === 'reaction') {
+        const spend = await this.spendAction(campaignId, casterTokenId, 'reaction');
+        if (!spend.ok) return { ok: false, reason: spend.reason };
+      }
+    }
+
+    // 4. Po pomyślnej walidacji akcji — zapisz zużyty slot
+    if (casterChar && pendingSlotState) {
+      await query(
+        'UPDATE characters SET spell_slots = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+        [JSON.stringify(pendingSlotState), casterChar.id]
+      );
+    }
 
     const targets = MapTactics.tokensInZoneCells(tokens, serverCells);
     const dc = await this._getCasterSpellDc(caster);
@@ -2129,7 +2469,10 @@ const combatOps = {
     zones.push(committed);
     await this.updateZones(campaignId, zones);
 
-    const logExpr = `${spell.name || spell.namePl || 'AoE'}: ${results.length} celów, ${fullDmg.total} obrażeń (ST ${saveAbility} DC ${dc})`;
+    const slotInfo = casterChar && spellLevel > 0
+      ? ` [slot ${slotLevel}]`
+      : (spellLevel === 0 ? ' [cantrip]' : '');
+    const logExpr = `${spell.name || spell.namePl || 'AoE'}${slotInfo}: ${results.length} celów, ${fullDmg.total} obrażeń (ST ${saveAbility} DC ${dc})`;
     const logEntry = await diceLogOps.create(
       campaignId,
       userId,
@@ -2145,6 +2488,8 @@ const combatOps = {
       zone: committed,
       zones,
       results,
+      slotLevel: spellLevel > 0 ? slotLevel : null,
+      casterCharacterId: casterChar?.id || null,
       damageRoll: fullDmg,
       dc,
       logEntry
@@ -2261,6 +2606,120 @@ const lootTableOps = {
 
   async delete(id) {
     await query('DELETE FROM loot_tables WHERE id = $1', [id]);
+  }
+};
+
+const tokenImageOps = {
+  async listByCampaign(campaignId) {
+    const res = await query('SELECT * FROM token_images WHERE campaign_id = $1 ORDER BY created_at DESC', [campaignId]);
+    return res.rows;
+  },
+
+  async findById(id) {
+    const res = await query('SELECT * FROM token_images WHERE id = $1', [id]);
+    return one(res);
+  },
+
+  async create(campaignId, data) {
+    const id = uuidv4();
+    await query(
+      'INSERT INTO token_images (id, campaign_id, name, image_url, category, uploaded_by) VALUES ($1, $2, $3, $4, $5, $6)',
+      [
+        id,
+        campaignId,
+        String(data.name || ''),
+        String(data.image_url || ''),
+        String(data.category || 'character'),
+        String(data.uploaded_by || '')
+      ]
+    );
+    return this.findById(id);
+  },
+
+  async update(id, data) {
+    const fields = [];
+    const vals = [];
+    if (data.name !== undefined)     { fields.push(`name = $${fields.length + 1}`);     vals.push(String(data.name)); }
+    if (data.category !== undefined) { fields.push(`category = $${fields.length + 1}`); vals.push(String(data.category)); }
+    if (!fields.length) return this.findById(id);
+    vals.push(id);
+    await query(`UPDATE token_images SET ${fields.join(', ')} WHERE id = $${vals.length}`, vals);
+    return this.findById(id);
+  },
+
+  async delete(id) {
+    await query('DELETE FROM token_images WHERE id = $1', [id]);
+  },
+
+  async usageCount(campaignId, imageUrl) {
+    const res = await query(
+      'SELECT COUNT(*)::int AS n FROM map_tokens WHERE campaign_id = $1 AND image_url = $2',
+      [campaignId, imageUrl]
+    );
+    return parseInt(res.rows[0]?.n, 10) || 0;
+  }
+};
+
+const customItemOps = {
+  async listByCampaign(campaignId) {
+    const res = await query('SELECT * FROM custom_items WHERE campaign_id = $1 ORDER BY created_at DESC', [campaignId]);
+    return res.rows.map((r) => ({
+      ...r,
+      price_copper: parseInt(r.price_copper, 10) || 0,
+      weight: parseFloat(r.weight) || 0,
+      data: economyLib.parseJson(r.data, {})
+    }));
+  },
+
+  async findById(id) {
+    const res = await query('SELECT * FROM custom_items WHERE id = $1', [id]);
+    const row = one(res);
+    if (!row) return null;
+    return {
+      ...row,
+      price_copper: parseInt(row.price_copper, 10) || 0,
+      weight: parseFloat(row.weight) || 0,
+      data: economyLib.parseJson(row.data, {})
+    };
+  },
+
+  async create(campaignId, data) {
+    const id = uuidv4();
+    const category = String(data.category || 'gear').toLowerCase();
+    await query(
+      'INSERT INTO custom_items (id, campaign_id, name, category, weight, price_copper, description, data) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+      [
+        id,
+        campaignId,
+        String(data.name || 'Bez nazwy'),
+        category,
+        parseFloat(data.weight) || 0,
+        parseInt(data.priceCopper ?? data.price_copper, 10) || 0,
+        String(data.description || ''),
+        JSON.stringify(data.data || {})
+      ]
+    );
+    return this.findById(id);
+  },
+
+  async update(id, data) {
+    const fields = [];
+    const vals = [];
+    if (data.name !== undefined)         { fields.push(`name = $${fields.length + 1}`);          vals.push(String(data.name)); }
+    if (data.category !== undefined)     { fields.push(`category = $${fields.length + 1}`);      vals.push(String(data.category).toLowerCase()); }
+    if (data.weight !== undefined)       { fields.push(`weight = $${fields.length + 1}`);        vals.push(parseFloat(data.weight) || 0); }
+    if (data.priceCopper !== undefined)  { fields.push(`price_copper = $${fields.length + 1}`);  vals.push(parseInt(data.priceCopper, 10) || 0); }
+    if (data.price_copper !== undefined) { fields.push(`price_copper = $${fields.length + 1}`);  vals.push(parseInt(data.price_copper, 10) || 0); }
+    if (data.description !== undefined)  { fields.push(`description = $${fields.length + 1}`);   vals.push(String(data.description)); }
+    if (data.data !== undefined)         { fields.push(`data = $${fields.length + 1}`);          vals.push(JSON.stringify(data.data || {})); }
+    if (!fields.length) return this.findById(id);
+    vals.push(id);
+    await query(`UPDATE custom_items SET ${fields.join(', ')} WHERE id = $${vals.length}`, vals);
+    return this.findById(id);
+  },
+
+  async delete(id) {
+    await query('DELETE FROM custom_items WHERE id = $1', [id]);
   }
 };
 
@@ -2613,6 +3072,8 @@ module.exports = {
   conditionOps,
   merchantOps,
   lootTableOps,
+  customItemOps,
+  tokenImageOps,
   lootGrantOps,
   economyOps,
   musicOps,

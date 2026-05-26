@@ -6,11 +6,13 @@ const App = {
   joinedCampaignId: null,
 
   init() {
+    if (typeof Themes !== 'undefined') Themes.init();
     Auth.init();
     Campaigns.init();
     Characters.init();
     PlayerHud.init();
     Dice.init();
+    if (typeof DiceSkins !== 'undefined') DiceSkins.init();
     Chat.init();
     CampaignMusic.init();
     BattleMap.init();
@@ -21,6 +23,7 @@ const App = {
     DMPanel.init();
     Economy.init();
     DMEconomy.init();
+    if (typeof TokenLibrary !== 'undefined') TokenLibrary.init();
 
     document.querySelectorAll('.modal-close').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -34,7 +37,15 @@ const App = {
     });
 
     document.querySelectorAll('.session-tab').forEach(tab => {
-      tab.addEventListener('click', () => {
+      tab.addEventListener('click', (event) => {
+        // Jeśli użytkownik ręcznie zmienia panel podczas oczekującego powrotu po rzucie kości — anuluj powrót.
+        // Auto-switch wewnętrzny (Dice._maybeSwitchToDicePanel) wywołuje .click() syntetycznie,
+        // ale ustawia _pendingReturnTab PRZED kliknięciem, więc auto-clicki nie anulują same siebie.
+        // Tu rozróżniamy: tylko isTrusted ruchy ludzkie anulują pending return.
+        if (event.isTrusted && typeof Dice !== 'undefined' && Dice.cancelReturn) {
+          Dice.cancelReturn();
+        }
+
         document.querySelectorAll('.session-tab').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.session-panel').forEach(p => p.classList.remove('active'));
         tab.classList.add('active');
@@ -75,8 +86,9 @@ const App = {
       badge.className = `role-badge ${campaign.role}`;
 
       const isDm = campaign.role === 'dm';
+      document.body.classList.toggle('is-dm', isDm);
       document.querySelectorAll('.dm-only').forEach(el => {
-        el.style.display = isDm ? '' : 'none';
+        el.style.removeProperty('display');
       });
       document.querySelectorAll('.dm-only-tab').forEach(el => {
         el.classList.toggle('visible', isDm);
@@ -105,6 +117,7 @@ const App = {
     } else if (typeof DMEconomy !== 'undefined') {
       DMEconomy.load();
     }
+    if (typeof TokenLibrary !== 'undefined') TokenLibrary.load();
     if (App.socket) {
       App.socket.emit('get-initiative');
     }
@@ -216,8 +229,35 @@ const App = {
       if (typeof MapZones !== 'undefined') MapZones.onAoeResolved(data);
       BattleMap.loadMap();
     });
+    this.socket.on('combat-aoo-trigger', (data) => {
+      if (typeof MapCombat !== 'undefined') MapCombat.onAooTrigger?.(data);
+    });
+    this.socket.on('map-hazard-tick', (data) => {
+      const kind = data.kind === 'turn_start' ? 'zaczyna turę w' : 'wchodzi w';
+      const msg = `${data.icon || '⚠️'} ${data.tokenName} ${kind} ${data.label} → ${data.amount} obrażeń (${data.damage} ${data.damageType})`;
+      showToast(msg, 'warning');
+    });
+    this.socket.on('combat-aoo-reaction-result', (data) => {
+      if (typeof MapCombat !== 'undefined') MapCombat.onAooReactionResult?.(data);
+    });
     this.socket.on('dice-log-entry', (entry) => {
       if (typeof Dice !== 'undefined' && Dice.onLogEntry) Dice.onLogEntry(entry);
+    });
+    this.socket.on('character-slots-update', (data) => {
+      // Odśwież kartę postaci jeśli akurat otwarta lub jeśli to nasz aktywny token
+      if (typeof Characters !== 'undefined' && Characters.refreshOpenSheetIfMatches) {
+        Characters.refreshOpenSheetIfMatches(data?.characterId);
+      }
+      if (typeof Chat !== 'undefined' && Chat.refreshDmPuppetPanel) Chat.refreshDmPuppetPanel();
+    });
+    this.socket.on('character-rest', (data) => {
+      const name = data?.characterName ? `${data.characterName}: ` : '';
+      if (data?.type === 'long') {
+        showToast(`${name}😴 Długi odpoczynek — pełne HP i sloty`, 'success');
+      } else if (data?.type === 'short') {
+        const healMsg = data.healed ? `, leczy ${data.healed} HP` : '';
+        showToast(`${name}🛌 Krótki odpoczynek (${data.hitDiceSpent || 0} HD${healMsg})`, 'info');
+      }
     });
     this.socket.on('map-token-moved', (data) => BattleMap.moveToken(data));
     this.socket.on('map-pointer', (data) => BattleMap.showPointer(data));

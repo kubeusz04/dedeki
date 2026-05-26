@@ -214,9 +214,25 @@ const Chat = {
 
     document.getElementById('chat-party-me')?.addEventListener('click', (e) => {
       const hpBtn = e.target.closest('[data-puppet-hp-delta]');
-      if (!hpBtn) return;
-      e.stopPropagation();
-      this.adjustPuppetHp(parseInt(hpBtn.dataset.puppetHpDelta, 10) || 0);
+      if (hpBtn) {
+        e.stopPropagation();
+        this.adjustPuppetHp(parseInt(hpBtn.dataset.puppetHpDelta, 10) || 0);
+        return;
+      }
+      const customBtn = e.target.closest('[data-puppet-hp-custom]');
+      if (customBtn) {
+        e.stopPropagation();
+        this.applyPuppetHpCustom(customBtn.dataset.puppetHpCustom);
+      }
+    });
+
+    document.getElementById('chat-party-me')?.addEventListener('keydown', (e) => {
+      if (e.target?.id !== 'chat-puppet-hp-amount') return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        this.applyPuppetHpCustom(e.shiftKey ? 'heal' : 'dmg');
+      }
     });
   },
 
@@ -225,12 +241,55 @@ const Chat = {
     if (!puppet || !delta) return;
     const max = Math.max(0, parseInt(puppet.max_hp, 10) || 0);
     const next = Math.max(0, Math.min(max || 9999, (parseInt(puppet.current_hp, 10) || 0) + delta));
+    await this._patchPuppetHp(puppet, next, delta);
+  },
+
+  async setPuppetHpAbsolute(value) {
+    const puppet = this.getActivePuppet();
+    if (!puppet) return;
+    const max = Math.max(0, parseInt(puppet.max_hp, 10) || 0);
+    const cur = Math.max(0, parseInt(puppet.current_hp, 10) || 0);
+    const next = Math.max(0, Math.min(max || 9999, value));
+    await this._patchPuppetHp(puppet, next, next - cur);
+  },
+
+  async applyPuppetHpCustom(mode) {
+    const puppet = this.getActivePuppet();
+    if (!puppet) return;
+    const input = document.getElementById('chat-puppet-hp-amount');
+
+    if (mode === 'full') {
+      const max = Math.max(0, parseInt(puppet.max_hp, 10) || 0);
+      if (max > 0) await this.setPuppetHpAbsolute(max);
+      if (input) input.value = '';
+      return;
+    }
+
+    const raw = parseInt(input?.value, 10);
+    if (!Number.isFinite(raw) || raw < 0) {
+      showToast('Wpisz dodatnią liczbę HP', 'warning');
+      input?.focus();
+      return;
+    }
+
+    if (mode === 'set') await this.setPuppetHpAbsolute(raw);
+    else if (mode === 'heal') await this.adjustPuppetHp(raw);
+    else if (mode === 'dmg') await this.adjustPuppetHp(-raw);
+
+    if (input) input.value = '';
+  },
+
+  async _patchPuppetHp(puppet, nextHp, deltaForToast) {
     try {
       const updated = await apiFetch(`/npcs/${puppet.id}`, {
         method: 'PUT',
-        body: JSON.stringify({ current_hp: next })
+        body: JSON.stringify({ current_hp: nextHp })
       });
       this.onNpcUpdated(updated);
+      if (deltaForToast) {
+        const sign = deltaForToast > 0 ? '+' : '';
+        showToast(`${puppet.name}: ${sign}${deltaForToast} HP (teraz ${nextHp}/${updated.max_hp})`, deltaForToast > 0 ? 'success' : 'info');
+      }
     } catch (err) {
       showToast(err.message || 'Nie udało się zmienić HP', 'error');
     }
@@ -326,10 +385,19 @@ const Chat = {
       <div class="chat-dm-puppet-wrap">
         ${this.renderHpCard(puppet, 'me', { isNpc: true, isPuppet: true })}
         <div class="chat-dm-puppet-actions">
+          <button type="button" class="chat-hp-btn" data-puppet-hp-delta="-10" title="−10 HP">−10</button>
           <button type="button" class="chat-hp-btn" data-puppet-hp-delta="-5" title="−5 HP">−5</button>
           <button type="button" class="chat-hp-btn" data-puppet-hp-delta="-1" title="−1 HP">−1</button>
           <button type="button" class="chat-hp-btn" data-puppet-hp-delta="1" title="+1 HP">+1</button>
           <button type="button" class="chat-hp-btn" data-puppet-hp-delta="5" title="+5 HP">+5</button>
+          <button type="button" class="chat-hp-btn" data-puppet-hp-delta="10" title="+10 HP">+10</button>
+        </div>
+        <div class="chat-dm-puppet-hpcustom">
+          <input type="number" id="chat-puppet-hp-amount" class="input-sm" min="0" step="1" placeholder="ile HP" value="">
+          <button type="button" class="btn btn-sm btn-secondary" data-puppet-hp-custom="dmg" title="Odejmij wpisaną wartość od HP">− Dmg</button>
+          <button type="button" class="btn btn-sm btn-secondary" data-puppet-hp-custom="heal" title="Dodaj wpisaną wartość do HP">+ Heal</button>
+          <button type="button" class="btn btn-sm btn-secondary" data-puppet-hp-custom="set" title="Ustaw HP na wpisaną wartość">= Set</button>
+          <button type="button" class="btn btn-sm btn-secondary" data-puppet-hp-custom="full" title="Przywróć pełne HP">⟳ Full</button>
         </div>
         <button type="button" class="btn btn-sm btn-primary btn-full" data-dm-switch-puppet>🔄 Zmień postać</button>
         <p class="chat-dm-puppet-hint sheet-hint">${escapeHtml(kind)} · kliknij kartę NPC po lewej, aby szybko przełączyć</p>

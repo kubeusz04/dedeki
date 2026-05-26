@@ -31,7 +31,8 @@ const MapZoneTypes = {
       movementCost: 2,
       fill: 'rgba(255, 120, 40, 0.35)',
       stroke: 'rgba(200, 60, 20, 0.75)',
-      hint: 'Trudny teren. Obrażenia z zaklęć w tym obszarze.'
+      hint: '1d6 ogień gdy wejdziesz lub zaczynasz turę.',
+      hazard: { damage: '1d6', damageType: 'fire', icon: '🔥', label: 'Ogień' }
     },
     acid: {
       id: 'acid',
@@ -39,7 +40,8 @@ const MapZoneTypes = {
       movementCost: 2,
       fill: 'rgba(100, 220, 80, 0.35)',
       stroke: 'rgba(60, 160, 50, 0.7)',
-      hint: 'Trudny teren.'
+      hint: '1d4 kwas gdy wejdziesz lub zaczynasz turę.',
+      hazard: { damage: '1d4', damageType: 'acid', icon: '🧪', label: 'Kwas' }
     },
     poison: {
       id: 'poison',
@@ -47,7 +49,26 @@ const MapZoneTypes = {
       movementCost: 2,
       fill: 'rgba(140, 80, 180, 0.3)',
       stroke: 'rgba(100, 50, 140, 0.65)',
-      hint: 'Trudny teren.'
+      hint: '1d4 trucizna gdy wejdziesz lub zaczynasz turę.',
+      hazard: { damage: '1d4', damageType: 'poison', icon: '☠️', label: 'Trucizna' }
+    },
+    lightning: {
+      id: 'lightning',
+      label: 'Pole błyskawic',
+      movementCost: 1,
+      fill: 'rgba(255, 240, 120, 0.35)',
+      stroke: 'rgba(220, 200, 50, 0.85)',
+      hint: '1d6 błyskawica gdy wejdziesz lub zaczynasz turę.',
+      hazard: { damage: '1d6', damageType: 'lightning', icon: '⚡', label: 'Błyskawica' }
+    },
+    necrotic: {
+      id: 'necrotic',
+      label: 'Aura nekrotyczna',
+      movementCost: 1,
+      fill: 'rgba(80, 40, 100, 0.45)',
+      stroke: 'rgba(120, 60, 140, 0.85)',
+      hint: '1d4 nekrotyczne gdy wejdziesz lub zaczynasz turę.',
+      hazard: { damage: '1d4', damageType: 'necrotic', icon: '💀', label: 'Nekroza' }
     },
     water: {
       id: 'water',
@@ -89,5 +110,14 @@ const MapZoneTypes = {
   movementCostForType(terrainType) {
     const t = this.getTerrain(terrainType);
     return t.movementCost || 1;
+  },
+
+  hazardForType(terrainType) {
+    const t = this.TERRAIN[terrainType];
+    return t?.hazard || null;
   }
 };
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = MapZoneTypes;
+}

@@ -124,6 +124,7 @@ const Economy = {
             <button type="button" class="btn btn-sm btn-secondary inv-cat-btn active" data-cat="gear">Wyposażenie</button>
             <button type="button" class="btn btn-sm btn-secondary inv-cat-btn" data-cat="armor">Zbroje</button>
             <button type="button" class="btn btn-sm btn-secondary inv-cat-btn" data-cat="weapon">Bronie</button>
+            <button type="button" class="btn btn-sm btn-secondary inv-cat-btn" data-cat="custom">🛠️ Własne</button>
           </div>
           <div class="inv-catalog-grid" id="inv-catalog-grid"></div>
         </details>` : ''}
@@ -167,7 +168,14 @@ const Economy = {
       let list = [];
       if (cat === 'armor') list = DndRules.ARMOR_TEMPLATES;
       else if (cat === 'weapon') list = DndRules.WEAPON_TEMPLATES;
-      else list = DndRules.GEAR_TEMPLATES;
+      else if (cat === 'custom') {
+        const customs = (typeof DMEconomy !== 'undefined' ? DMEconomy.customItems : []) || [];
+        if (!customs.length) {
+          grid.innerHTML = '<p class="info-text">MG nie utworzył jeszcze żadnych własnych przedmiotów. Otwórz panel „💰 Ekonomia → 🛠️ Własny przedmiot".</p>';
+          return;
+        }
+        list = customs.map((cu) => ({ id: `custom:${cu.id}`, namePl: cu.name }));
+      } else list = DndRules.GEAR_TEMPLATES;
       grid.innerHTML = list.map((t) =>
         `<button type="button" class="btn btn-sm btn-secondary inv-tpl-btn" data-template-id="${t.id}">${escapeHtml(t.namePl)}</button>`
       ).join('');
@@ -200,7 +208,9 @@ const Economy = {
   },
 
   async addTemplateToCharacter(charId, templateId) {
-    const item = DndRules.itemFromTemplate(templateId);
+    const item = (typeof DMEconomy !== 'undefined' && DMEconomy.itemFromAnyTemplate)
+      ? DMEconomy.itemFromAnyTemplate(templateId)
+      : DndRules.itemFromTemplate(templateId);
     if (!item) return;
     const c = Characters.sheetCharacter || Characters.activeCharacter;
     if (!c) return;

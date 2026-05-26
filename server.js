@@ -11,7 +11,7 @@ const multer = require('multer');
 const {
   initializeDatabase, userOps, campaignOps, characterOps, messageOps, npcOps,
   initiativeOps, noteOps, mapOps, combatOps, diceLogOps, conditionOps,
-  merchantOps, lootTableOps, lootGrantOps, economyOps, musicOps, resolveEntityStats,
+  merchantOps, lootTableOps, customItemOps, tokenImageOps, lootGrantOps, economyOps, musicOps, resolveEntityStats,
   mapPresetOps
 } = require('./database');
 const { generateToken, authMiddleware, socketAuthMiddleware } = require('./auth');
@@ -130,8 +130,29 @@ async function afterInitiativeTurnChange(campaignId) {
   await combatOps.syncTurnWithInitiative(campaignId);
   const state = await initiativeOps.getState(campaignId);
   io.to(campaignId).emit('initiative-update', state);
-  await broadcastCombatUpdate(campaignId);
+
   const active = state.entries.find((e) => e.is_active);
+  if (active?.map_token_id) {
+    try {
+      const hits = await combatOps.resolveHazardsForTurnStart(campaignId, active.map_token_id);
+      if (hits.length) {
+        const payload = await buildMapPayload(campaignId);
+        io.to(campaignId).emit('map-update', payload);
+        for (const hit of hits) {
+          io.to(campaignId).emit('map-hazard-tick', hit);
+          io.to(campaignId).emit('dice-log-entry', {
+            type: 'hazard',
+            text: `${hit.icon} ${hit.tokenName} zaczyna turę w hazardzie i traci ${hit.amount} obrażeń (${hit.label}, ${hit.damage} ${hit.damageType})`,
+            at: Date.now()
+          });
+        }
+      }
+    } catch (hzErr) {
+      console.error('hazard-on-turn-start', hzErr);
+    }
+  }
+
+  await broadcastCombatUpdate(campaignId);
   if (active?.map_token_id) {
     io.to(campaignId).emit('initiative-highlight', {
       entryId: active.id,
@@ -184,6 +205,31 @@ const tokenImageUpload = multer({
     cb(null, true);
   }
 });
+
+// Upload do biblioteki tokenów (per kampania)
+const tokenLibraryUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, tokenUploadsDir),
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname || '').toLowerCase();
+      const allowedExt = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
+      const safeExt = allowedExt.includes(ext) ? ext : '.png';
+      cb(null, `lib-${req.params.id}-${Date.now()}${safeExt}`);
+    }
+  }),
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (!file.mimetype.startsWith('image/')) return cb(new Error('Dozwolone są tylko pliki graficzne'));
+    cb(null, true);
+  }
+});
+
+function tryDeleteTokenLibraryImage(relativePath) {
+  if (!relativePath || !relativePath.startsWith('/uploads/tokens/')) return;
+  const candidate = path.normalize(path.join(__dirname, 'public', relativePath));
+  if (!candidate.startsWith(tokenUploadsDir)) return;
+  fs.promises.unlink(candidate).catch(() => {});
+}
 
 function tryDeleteMapBackground(relativePath) {
   if (!relativePath || !relativePath.startsWith('/uploads/maps/')) return;
@@ -1435,7 +1481,46 @@ io.on('connection', (socket) => {
         prevY,
         trailsEnabled: !!settings?.trails_enabled
       });
+
+      try {
+        const hazardHits = await combatOps.resolveHazardsForMove(
+          socket.campaignId, data.id, prevX, prevY, data.x, data.y
+        );
+        if (hazardHits.length) {
+          const payload = await buildMapPayload(socket.campaignId);
+          io.to(socket.campaignId).emit('map-update', payload);
+          for (const hit of hazardHits) {
+            io.to(socket.campaignId).emit('map-hazard-tick', hit);
+            io.to(socket.campaignId).emit('dice-log-entry', {
+              type: 'hazard',
+              text: `${hit.icon} ${hit.tokenName} traci ${hit.amount} obrażeń (${hit.label}, ${hit.damage} ${hit.damageType})`,
+              at: Date.now()
+            });
+          }
+        }
+      } catch (hzErr) {
+        console.error('hazard-on-move', hzErr);
+      }
+
       await broadcastCombatUpdate(socket.campaignId);
+
+      try {
+        const aoo = await combatOps.detectOpportunityAttacks(
+          socket.campaignId, data.id, prevX, prevY, data.x, data.y
+        );
+        if (aoo.length) {
+          const dmSockets = [...io.sockets.adapter.rooms.get(socket.campaignId) || []]
+            .map((id) => io.sockets.sockets.get(id))
+            .filter((s) => s?.userRole === 'dm');
+          for (const t of aoo) {
+            for (const dm of dmSockets) {
+              dm.emit('combat-aoo-trigger', t);
+            }
+          }
+        }
+      } catch (aooErr) {
+        console.error('aoo-detect', aooErr);
+      }
     } catch (err) {
       console.error('map-move-token', err);
       socket.emit('combat-error', { message: 'Błąd ruchu tokena' });
@@ -1654,6 +1739,20 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('combat-aoo-spend-reaction', async (data) => {
+    if (!socket.campaignId || socket.userRole !== 'dm') return;
+    try {
+      const result = await combatOps.spendReaction(socket.campaignId, data.attackerTokenId);
+      socket.emit('combat-aoo-reaction-result', { ...result, attackerTokenId: data.attackerTokenId });
+      if (result.ok) {
+        await broadcastCombatUpdate(socket.campaignId);
+      }
+    } catch (err) {
+      console.error('combat-aoo-spend-reaction', err);
+      socket.emit('combat-aoo-reaction-result', { ok: false });
+    }
+  });
+
   socket.on('combat-apply-damage', async (data) => {
     if (!socket.campaignId) return;
     try {
@@ -1758,16 +1857,39 @@ io.on('connection', (socket) => {
   });
 
   socket.on('combat-aoe-resolve', async (data) => {
-    if (!socket.campaignId || socket.userRole !== 'dm') return;
+    if (!socket.campaignId) return;
+    // DM may always resolve AoE; players may resolve only if the caster token belongs to
+    // a character they own. This lets player wizards drop their own fireballs.
+    if (socket.userRole !== 'dm') {
+      try {
+        const casterId = data?.casterTokenId;
+        const caster = casterId ? await mapOps.getTokenById(casterId) : null;
+        if (!caster || caster.entity_type !== 'player') return;
+        const char = caster.entity_id ? await characterOps.findById(caster.entity_id) : null;
+        if (!char || char.user_id !== socket.user.id) return;
+      } catch (_e) {
+        return;
+      }
+    }
     try {
       const result = await combatOps.resolveAoeSpell(
         socket.campaignId,
         socket.user.id,
         socket.user.display_name || socket.user.username,
-        data
+        { ...data, isDm: socket.userRole === 'dm' }
       );
       if (!result.ok) {
-        socket.emit('combat-error', { message: result.reason || 'Nie udało się rozstrzygnąć AoE' });
+        const reasonMsg = {
+          spell_not_known: 'Postać nie zna tego czaru',
+          no_slot: 'Brak slotu o tym poziomie',
+          action_used: 'Akcja już została zużyta w tej turze',
+          bonus_used: 'Akcja dodatkowa już zużyta',
+          no_reaction: 'Reakcja już zużyta',
+          no_turn: 'Token nie ma tury w walce',
+          bad_payload: 'Nieprawidłowe dane czaru',
+          no_caster: 'Nie znaleziono tokenu rzucającego'
+        }[result.reason] || `Nie udało się rozstrzygnąć AoE (${result.reason || 'nieznany błąd'})`;
+        socket.emit('combat-error', { message: reasonMsg });
         return;
       }
       const payload = await buildMapPayload(socket.campaignId);
@@ -1776,10 +1898,76 @@ io.on('connection', (socket) => {
       if (result.logEntry) {
         io.to(socket.campaignId).emit('dice-log-entry', result.logEntry);
       }
+      // Powiadom o aktualizacji slotów postaci-rzucającego, by UI mogło odświeżyć panel
+      if (result.casterCharacterId) {
+        io.to(socket.campaignId).emit('character-slots-update', {
+          characterId: result.casterCharacterId
+        });
+      }
       await broadcastCombatUpdate(socket.campaignId);
     } catch (err) {
       console.error('combat-aoe-resolve', err);
       socket.emit('combat-error', { message: err.message });
+    }
+  });
+
+  socket.on('character-long-rest', async (data) => {
+    if (!socket.campaignId) return;
+    const charId = data?.characterId;
+    if (!charId) return;
+    try {
+      const char = await characterOps.findById(charId);
+      if (!char) return;
+      const isOwner = char.user_id === socket.user.id;
+      if (!isOwner && socket.userRole !== 'dm') return;
+      const updated = await characterOps.longRest(charId);
+      io.to(socket.campaignId).emit('character-slots-update', { characterId: charId });
+      io.to(socket.campaignId).emit('character-rest', {
+        characterId: charId,
+        type: 'long',
+        characterName: updated?.name || ''
+      });
+    } catch (err) {
+      console.error('character-long-rest', err);
+    }
+  });
+
+  socket.on('character-short-rest', async (data) => {
+    if (!socket.campaignId) return;
+    const charId = data?.characterId;
+    if (!charId) return;
+    try {
+      const char = await characterOps.findById(charId);
+      if (!char) return;
+      const isOwner = char.user_id === socket.user.id;
+      if (!isOwner && socket.userRole !== 'dm') return;
+      const result = await characterOps.shortRest(charId, data.hitDiceSpent || 0);
+      io.to(socket.campaignId).emit('character-slots-update', { characterId: charId });
+      io.to(socket.campaignId).emit('character-rest', {
+        characterId: charId,
+        type: 'short',
+        characterName: result?.character?.name || '',
+        healed: result?.healed || 0,
+        hitDiceSpent: result?.hitDiceSpent || 0
+      });
+    } catch (err) {
+      console.error('character-short-rest', err);
+    }
+  });
+
+  socket.on('character-set-slots', async (data) => {
+    if (!socket.campaignId) return;
+    const charId = data?.characterId;
+    if (!charId) return;
+    try {
+      const char = await characterOps.findById(charId);
+      if (!char) return;
+      const isOwner = char.user_id === socket.user.id;
+      if (!isOwner && socket.userRole !== 'dm') return;
+      await characterOps.setSpellSlots(charId, data.slots || { used: {} });
+      io.to(socket.campaignId).emit('character-slots-update', { characterId: charId });
+    } catch (err) {
+      console.error('character-set-slots', err);
     }
   });
 
@@ -1891,6 +2079,94 @@ app.delete('/api/loot-tables/:id', authMiddleware, async (req, res) => {
   if (!t) return res.status(404).json({ error: 'Nie znaleziono' });
   if (!(await campaignOps.isDm(t.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
   await lootTableOps.delete(req.params.id);
+  res.json({ ok: true });
+});
+
+// ===== Custom items (DM-defined catalog entries) =====
+app.get('/api/campaigns/:id/custom-items', authMiddleware, async (req, res) => {
+  if (!(await requireCampaignMember(req.params.id, req.user.id))) return res.status(403).json({ error: 'Brak dostępu' });
+  res.json(await customItemOps.listByCampaign(req.params.id));
+});
+
+app.post('/api/campaigns/:id/custom-items', authMiddleware, async (req, res) => {
+  if (!(await campaignOps.isDm(req.params.id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  if (!req.body?.name || !String(req.body.name).trim()) return res.status(400).json({ error: 'Wymagana nazwa' });
+  res.json(await customItemOps.create(req.params.id, req.body));
+});
+
+app.put('/api/custom-items/:id', authMiddleware, async (req, res) => {
+  const it = await customItemOps.findById(req.params.id);
+  if (!it) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await campaignOps.isDm(it.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  res.json(await customItemOps.update(req.params.id, req.body));
+});
+
+app.delete('/api/custom-items/:id', authMiddleware, async (req, res) => {
+  const it = await customItemOps.findById(req.params.id);
+  if (!it) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await campaignOps.isDm(it.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  await customItemOps.delete(req.params.id);
+  res.json({ ok: true });
+});
+
+// ===== Token image library (per campaign) =====
+app.get('/api/campaigns/:id/token-images', authMiddleware, async (req, res) => {
+  if (!(await requireCampaignMember(req.params.id, req.user.id))) return res.status(403).json({ error: 'Brak dostępu' });
+  res.json(await tokenImageOps.listByCampaign(req.params.id));
+});
+
+app.post('/api/campaigns/:id/token-images', authMiddleware, async (req, res) => {
+  if (!(await campaignOps.isDm(req.params.id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  tokenLibraryUpload.single('image')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || 'Błąd uploadu' });
+    if (!req.file) return res.status(400).json({ error: 'Nie przesłano pliku' });
+    const imageUrl = `/uploads/tokens/${req.file.filename}`;
+    try {
+      const entry = await tokenImageOps.create(req.params.id, {
+        name: req.body?.name || req.file.originalname || 'Token',
+        image_url: imageUrl,
+        category: req.body?.category || 'character',
+        uploaded_by: req.user.id
+      });
+      res.json(entry);
+    } catch (e) {
+      tryDeleteTokenLibraryImage(imageUrl);
+      res.status(500).json({ error: 'Nie udało się zapisać obrazu' });
+    }
+  });
+});
+
+app.put('/api/token-images/:id', authMiddleware, async (req, res) => {
+  const it = await tokenImageOps.findById(req.params.id);
+  if (!it) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await campaignOps.isDm(it.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  res.json(await tokenImageOps.update(req.params.id, req.body || {}));
+});
+
+app.delete('/api/token-images/:id', authMiddleware, async (req, res) => {
+  const it = await tokenImageOps.findById(req.params.id);
+  if (!it) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await campaignOps.isDm(it.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  const usage = await tokenImageOps.usageCount(it.campaign_id, it.image_url);
+  await tokenImageOps.delete(req.params.id);
+  // Usuń plik tylko jeśli nie jest używany przez żaden token
+  if (usage === 0) tryDeleteTokenLibraryImage(it.image_url);
+  res.json({ ok: true, deletedFile: usage === 0 });
+});
+
+// Zastosuj URL z biblioteki do tokenu (bez uploadu).
+app.put('/api/campaigns/:id/map/tokens/:tokenId/image-url', authMiddleware, async (req, res) => {
+  if (!(await campaignOps.isDm(req.params.id, req.user.id))) {
+    return res.status(403).json({ error: 'Tylko Mistrz Gry może zmieniać tokeny' });
+  }
+  const url = String(req.body?.imageUrl || '').trim();
+  // Pusta wartość = usuń grafikę
+  if (url && !url.startsWith('/uploads/') && !url.startsWith('data:image/')) {
+    return res.status(400).json({ error: 'Nieprawidłowy URL grafiki' });
+  }
+  await mapOps.updateToken(req.params.tokenId, { image_url: url });
+  const payload = await buildMapPayload(req.params.id);
+  io.to(req.params.id).emit('map-update', payload);
   res.json({ ok: true });
 });
 

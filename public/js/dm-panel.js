@@ -25,6 +25,7 @@ const DMPanel = {
     this.loadNpcs();
     this.loadPartyOverview();
     if (typeof DMEconomy !== 'undefined') DMEconomy.load();
+    if (typeof TokenLibrary !== 'undefined') TokenLibrary.load();
     if (typeof CampaignMusic !== 'undefined') CampaignMusic.renderDmPanel();
   },
 

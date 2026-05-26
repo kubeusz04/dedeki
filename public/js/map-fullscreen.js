@@ -68,6 +68,7 @@ const MapFullscreen = {
     if (!this.stage) return;
     this.stage.classList.toggle('map-fs-active', on);
     document.body.classList.toggle('map-fs-mode', on);
+    this.reparentOverlays(on);
     const btn = document.getElementById('btn-map-fullscreen');
     const btn2 = document.getElementById('btn-map-fullscreen-header');
     const label = on ? '✕ Wyjdź' : '⛶';
@@ -85,8 +86,9 @@ const MapFullscreen = {
     setTimeout(() => {
       if (typeof BattleMap !== 'undefined' && BattleMap.viewport) {
         BattleMap.viewport.dispatchEvent(new Event('scroll'));
+        if (typeof BattleMap.fitToViewport === 'function') BattleMap.fitToViewport();
       }
-    }, 80);
+    }, 120);
   },
 
   panelSide(panel) {
@@ -129,5 +131,73 @@ const MapFullscreen = {
     this.stage.classList.toggle('fs-edge-left', showLeft);
     this.stage.classList.toggle('fs-edge-right', showRight);
     this.stage.classList.toggle('fs-edge-top', showTop);
+  },
+
+  _overlayIds() {
+    return [
+      'generic-modal',
+      'character-modal',
+      'shop-modal',
+      'loot-modal',
+      'conditions-modal',
+      'toast-container',
+    ];
+  },
+
+  reparentOverlays(toStage) {
+    if (!this.stage) return;
+    this._overlayHomes = this._overlayHomes || new Map();
+
+    if (toStage) {
+      this._overlayIds().forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (!this._overlayHomes.has(id)) {
+          this._overlayHomes.set(id, { parent: el.parentNode, next: el.nextSibling });
+        }
+        if (el.parentNode !== this.stage) this.stage.appendChild(el);
+      });
+      this._startOverlayWatcher();
+    } else {
+      this._stopOverlayWatcher();
+      this._overlayIds().forEach((id) => {
+        const el = document.getElementById(id);
+        const home = this._overlayHomes.get(id);
+        if (!el || !home || !home.parent) return;
+        if (home.next && home.next.parentNode === home.parent) {
+          home.parent.insertBefore(el, home.next);
+        } else {
+          home.parent.appendChild(el);
+        }
+      });
+      this._overlayHomes.clear();
+    }
+  },
+
+  _startOverlayWatcher() {
+    if (this._overlayObserver || typeof MutationObserver === 'undefined') return;
+    const ids = new Set(this._overlayIds());
+    this._overlayObserver = new MutationObserver((mutations) => {
+      if (!this.isActive()) return;
+      for (const m of mutations) {
+        m.addedNodes.forEach((node) => {
+          if (node.nodeType !== 1) return;
+          if (ids.has(node.id) && node.parentNode !== this.stage) {
+            if (!this._overlayHomes.has(node.id)) {
+              this._overlayHomes.set(node.id, { parent: node.parentNode, next: node.nextSibling });
+            }
+            this.stage.appendChild(node);
+          }
+        });
+      }
+    });
+    this._overlayObserver.observe(document.body, { childList: true });
+  },
+
+  _stopOverlayWatcher() {
+    if (this._overlayObserver) {
+      this._overlayObserver.disconnect();
+      this._overlayObserver = null;
+    }
   }
 };

@@ -43,7 +43,7 @@ const MapZones = {
   load(zones) {
     this.zones = Array.isArray(zones) ? zones : MapTactics.parseZonesList(zones);
     this.renderList();
-    if (typeof BattleMap !== 'undefined') BattleMap.render();
+    if (typeof BattleMap !== 'undefined') (BattleMap.scheduleRender || BattleMap.render).call(BattleMap);
   },
 
   getTerrainIndex() {
@@ -147,8 +147,25 @@ const MapZones = {
     this.isPaintingTerrain = false;
   },
 
-  paintTerrainCell(x, y) {
-    const key = MapTactics.cellKey(x, y);
+  _brushCells(cx, cy, radius) {
+    const r = Math.max(0, parseInt(radius, 10) || 0) - 1;
+    if (r <= 0) return [{ x: cx, y: cy }];
+    const cells = [];
+    const gw = BattleMap.settings?.grid_width || 25;
+    const gh = BattleMap.settings?.grid_height || 18;
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (dx * dx + dy * dy > r * r + r) continue;
+        const x = cx + dx;
+        const y = cy + dy;
+        if (x < 0 || y < 0 || x >= gw || y >= gh) continue;
+        cells.push({ x, y });
+      }
+    }
+    return cells;
+  },
+
+  paintTerrainCell(x, y, radius = 1) {
     let zone = this.zones.find((z) => z.kind === 'terrain' && z.terrainType === this._terrainType && z.shape === 'cells');
     if (!zone) {
       zone = {
@@ -161,14 +178,17 @@ const MapZones = {
       };
       this.zones.push(zone);
     }
-    if (!zone.cells.includes(key)) zone.cells.push(key);
+    this._brushCells(x, y, radius).forEach((c) => {
+      const key = MapTactics.cellKey(c.x, c.y);
+      if (!zone.cells.includes(key)) zone.cells.push(key);
+    });
   },
 
-  eraseTerrainCell(x, y) {
-    const key = MapTactics.cellKey(x, y);
+  eraseTerrainCell(x, y, radius = 1) {
+    const eraseKeys = new Set(this._brushCells(x, y, radius).map((c) => MapTactics.cellKey(c.x, c.y)));
     this.zones = this.zones.map((z) => {
       if (z.kind !== 'terrain' || z.shape !== 'cells' || !z.cells) return z;
-      return { ...z, cells: z.cells.filter((c) => c !== key) };
+      return { ...z, cells: z.cells.filter((c) => !eraseKeys.has(c)) };
     }).filter((z) => !(z.shape === 'cells' && (!z.cells || !z.cells.length)));
   },
 

@@ -42,7 +42,11 @@ const BattleMap = {
   init() {
     this.canvas = document.getElementById('battle-map');
     this.viewport = document.getElementById('map-viewport');
-    this.ctx = this.canvas.getContext('2d');
+    this.ctx = this.canvas.getContext('2d', { alpha: true });
+    if (this.ctx) {
+      this.ctx.imageSmoothingEnabled = true;
+      this.ctx.imageSmoothingQuality = 'high';
+    }
 
     document.getElementById('btn-add-token')?.addEventListener('click', () => this.showAddTokenDialog());
     document.getElementById('btn-upload-map-bg')?.addEventListener('click', () => {
@@ -73,6 +77,18 @@ const BattleMap = {
         App.socket.emit('map-update-settings', { grid_size: parseInt(e.target.value, 10) });
       }
     });
+    document.getElementById('map-resolution-preset')?.addEventListener('change', (e) => {
+      const preset = e.target.value;
+      if (!preset) return;
+      const dims = this.resolutionPresetDims(preset);
+      if (!dims || !App.socket || !App.currentCampaign) return;
+      this._userZoomLocked = false;
+      App.socket.emit('map-update-settings', {
+        grid_width: dims.w,
+        grid_height: dims.h,
+        grid_size: dims.gs,
+      });
+    });
 
     this._gridOpacityDebounce = null;
     const opacitySlider = document.getElementById('map-grid-opacity');
@@ -98,11 +114,11 @@ const BattleMap = {
     });
 
     this.viewport?.addEventListener('wheel', (e) => {
-      if (e.ctrlKey || e.metaKey) {
-        e.preventDefault();
-        const delta = e.deltaY > 0 ? -0.1 : 0.1;
-        this.setZoom(this.zoom + delta);
-      }
+      if (e.shiftKey) return;
+      e.preventDefault();
+      const step = e.ctrlKey || e.metaKey ? 0.2 : 0.1;
+      const delta = e.deltaY > 0 ? -step : step;
+      this.zoomAtPoint(this.zoom * (1 + delta), e.clientX, e.clientY);
     }, { passive: false });
 
     this.canvas.addEventListener('mousedown', (e) => this.onMouseDown(e));
@@ -114,6 +130,10 @@ const BattleMap = {
       e.preventDefault();
       this.onRightClick(e);
     });
+    this.canvas.addEventListener('auxclick', (e) => {
+      if (e.button === 1) e.preventDefault();
+    });
+    this.bindPanning();
 
     document.getElementById('map-pins-list')?.addEventListener('click', (e) => {
       const row = e.target.closest('[data-pin-id]');
@@ -132,6 +152,8 @@ const BattleMap = {
     if (typeof MapFullscreen !== 'undefined') MapFullscreen.init();
     if (typeof MapZones !== 'undefined') MapZones.init();
     document.getElementById('btn-map-place-prop')?.addEventListener('click', () => this.openPropPlacementPicker());
+    document.getElementById('btn-map-fit')?.addEventListener('click', () => this.fitToViewport());
+    this.bindAutoFitResize();
   },
 
   isDm() {
@@ -180,9 +202,28 @@ const BattleMap = {
     this.render();
   },
 
-  setZoom(value) {
-    this.zoom = Math.max(0.4, Math.min(2.5, value));
+  setZoom(value, opts = {}) {
+    this.zoom = Math.max(0.15, Math.min(3, value));
+    this._userZoomLocked = !opts.fromAutoFit;
     this.applyZoom();
+    this.render();
+  },
+
+  zoomAtPoint(value, clientX, clientY) {
+    if (!this.canvas || !this.viewport) return this.setZoom(value);
+    const clamped = Math.max(0.15, Math.min(3, value));
+    if (clamped === this.zoom) return;
+    const rectBefore = this.canvas.getBoundingClientRect();
+    const worldX = (clientX - rectBefore.left) / this.zoom;
+    const worldY = (clientY - rectBefore.top) / this.zoom;
+    this.zoom = clamped;
+    this._userZoomLocked = true;
+    this.applyZoom();
+    const rectAfter = this.canvas.getBoundingClientRect();
+    const desiredScreenX = rectAfter.left + worldX * this.zoom;
+    const desiredScreenY = rectAfter.top + worldY * this.zoom;
+    this.viewport.scrollLeft += desiredScreenX - clientX;
+    this.viewport.scrollTop += desiredScreenY - clientY;
     this.render();
   },
 
@@ -193,6 +234,134 @@ const BattleMap = {
     const h = this.settings.grid_height * gs;
     this.canvas.style.width = `${w * this.zoom}px`;
     this.canvas.style.height = `${h * this.zoom}px`;
+  },
+
+  resolutionPresetDims(preset) {
+    const presets = {
+      '720':  { w: 32, h: 18, gs: 40 },
+      '1080': { w: 32, h: 18, gs: 60 },
+      '1440': { w: 32, h: 18, gs: 80 },
+      '2160': { w: 32, h: 18, gs: 120 },
+    };
+    return presets[String(preset)] || null;
+  },
+
+  detectResolutionPreset(w, h, gs) {
+    if (w !== 32 || h !== 18) return '';
+    const map = { 40: '720', 60: '1080', 80: '1440', 120: '2160' };
+    return map[gs] || '';
+  },
+
+  syncResolutionSelect() {
+    const sel = document.getElementById('map-resolution-preset');
+    if (!sel || !this.settings) return;
+    const preset = this.detectResolutionPreset(
+      this.settings.grid_width,
+      this.settings.grid_height,
+      this.settings.grid_size
+    );
+    sel.value = preset;
+  },
+
+  fitToViewport() {
+    if (!this.settings || !this.canvas || !this.viewport) return;
+    const rect = this.viewport.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return;
+    const gs = this.settings.grid_size;
+    const mapW = this.settings.grid_width * gs;
+    const mapH = this.settings.grid_height * gs;
+    const padding = 16;
+    const scaleX = (rect.width - padding) / mapW;
+    const scaleY = (rect.height - padding) / mapH;
+    const target = Math.max(0.15, Math.min(3, Math.min(scaleX, scaleY)));
+    this.zoom = target;
+    this._userZoomLocked = false;
+    this.applyZoom();
+    this.render();
+  },
+
+  scheduleAutoFit() {
+    if (this._autoFitTimer) cancelAnimationFrame(this._autoFitTimer);
+    this._autoFitTimer = requestAnimationFrame(() => {
+      this._autoFitTimer = null;
+      if (this._userZoomLocked) return;
+      this.fitToViewport();
+    });
+  },
+
+  bindPanning() {
+    if (this._panningBound) return;
+    this._panningBound = true;
+    this._spacePan = false;
+
+    this.canvas.addEventListener('mousedown', (e) => {
+      const wantsPan = e.button === 1 || (e.button === 0 && this._spacePan);
+      if (!wantsPan || !this.viewport) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      this._isPanning = true;
+      this._panStart = {
+        x: e.clientX,
+        y: e.clientY,
+        scrollLeft: this.viewport.scrollLeft,
+        scrollTop: this.viewport.scrollTop,
+      };
+      this._userZoomLocked = true;
+      document.body.classList.add('map-panning');
+    }, true);
+
+    const onMove = (e) => {
+      if (!this._isPanning) return;
+      const dx = e.clientX - this._panStart.x;
+      const dy = e.clientY - this._panStart.y;
+      this.viewport.scrollLeft = this._panStart.scrollLeft - dx;
+      this.viewport.scrollTop = this._panStart.scrollTop - dy;
+    };
+    const onUp = () => {
+      if (!this._isPanning) return;
+      this._isPanning = false;
+      document.body.classList.remove('map-panning');
+    };
+    window.addEventListener('mousemove', onMove, { passive: true });
+    window.addEventListener('mouseup', onUp, { passive: true });
+    window.addEventListener('blur', onUp);
+
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Space' && !this._isInputFocused()) {
+        if (!this._spacePan) {
+          this._spacePan = true;
+          document.body.classList.add('map-space-pan');
+        }
+        e.preventDefault();
+      }
+    });
+    window.addEventListener('keyup', (e) => {
+      if (e.code === 'Space') {
+        this._spacePan = false;
+        document.body.classList.remove('map-space-pan');
+      }
+    });
+  },
+
+  _isInputFocused() {
+    const el = document.activeElement;
+    if (!el) return false;
+    const tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+  },
+
+  bindAutoFitResize() {
+    if (this._resizeBound) return;
+    this._resizeBound = true;
+    const onResize = () => {
+      if (this._resizeDebounce) clearTimeout(this._resizeDebounce);
+      this._resizeDebounce = setTimeout(() => this.scheduleAutoFit(), 80);
+    };
+    window.addEventListener('resize', onResize);
+    if (this.viewport && typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(onResize);
+      ro.observe(this.viewport);
+    }
   },
 
   parseFogRevealed(settings) {
@@ -218,6 +387,9 @@ const BattleMap = {
   },
 
   loadMap() {
+    const now = Date.now();
+    if (this._lastMapLoadAt && now - this._lastMapLoadAt < 250) return;
+    this._lastMapLoadAt = now;
     App.socket?.emit('get-map');
   },
 
@@ -257,6 +429,7 @@ const BattleMap = {
     if (document.getElementById('map-grid-size')) {
       document.getElementById('map-grid-size').value = this.settings.grid_size;
     }
+    this.syncResolutionSelect();
     const opacitySlider = document.getElementById('map-grid-opacity');
     const opacityOut = document.getElementById('map-grid-opacity-value');
     const opacity = this.settings.grid_opacity ?? 100;
@@ -270,8 +443,9 @@ const BattleMap = {
       this.applyZoom();
       this.preloadTokenImages();
       this.renderSidebar();
-      this.render();
+      this.scheduleRender();
     }
+    this.scheduleAutoFit();
   },
 
   moveToken(data) {
@@ -339,12 +513,12 @@ const BattleMap = {
       this.backgroundImageSrc = '';
       this.applyZoom();
       this.renderSidebar();
-      this.render();
+      this.scheduleRender();
       return;
     }
     if (this.backgroundImageObj && this.backgroundImageSrc === src) {
       this.applyZoom();
-      this.render();
+      this.scheduleRender();
       return;
     }
     const image = new Image();
@@ -392,14 +566,36 @@ const BattleMap = {
     };
   },
 
+  scheduleRender() {
+    if (this._renderRaf) return;
+    this._renderRaf = requestAnimationFrame(() => {
+      this._renderRaf = null;
+      this.render();
+    });
+  },
+
   render() {
     if (!this.settings) return;
+    if (this._renderRaf) {
+      cancelAnimationFrame(this._renderRaf);
+      this._renderRaf = null;
+    }
     const gs = this.settings.grid_size;
     const w = this.settings.grid_width * gs;
     const h = this.settings.grid_height * gs;
 
-    this.canvas.width = w;
-    this.canvas.height = h;
+    if (this.canvas.width !== w) this.canvas.width = w;
+    if (this.canvas.height !== h) this.canvas.height = h;
+    if (this.ctx) {
+      // Reset all 2D context state so leftover globalCompositeOperation, transforms,
+      // line dashes etc. from prior frames cannot wipe pixels or corrupt the next frame.
+      this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+      this.ctx.globalCompositeOperation = 'source-over';
+      this.ctx.globalAlpha = 1;
+      this.ctx.setLineDash([]);
+      this.ctx.imageSmoothingEnabled = true;
+      this.ctx.imageSmoothingQuality = 'high';
+    }
 
     const ctx = this.ctx;
     const fogEnabled = !!this.settings.fog_enabled;
@@ -455,6 +651,7 @@ const BattleMap = {
     this.selectedPinId = null;
     this.renderSidebar();
     this.render();
+    if (typeof MapCombat !== 'undefined') MapCombat.renderOverlay?.();
   },
 
   pushBlockingUpdate() {
@@ -663,6 +860,63 @@ const BattleMap = {
     });
   },
 
+  drawHpBar(ctx, token, stats, tx, ty, size, gs) {
+    if (!stats || stats.hpMax <= 0) return;
+    const ratio = Math.max(0, Math.min(1, stats.hpCurrent / stats.hpMax));
+    const barH = Math.max(7, Math.round(gs * 0.18));
+    const barW = size - 6;
+    const barX = tx + 3;
+    const aboveY = ty - barH - 3;
+    const barY = aboveY >= 0 ? aboveY : ty + 2;
+    ctx.save();
+    ctx.fillStyle = 'rgba(20, 12, 6, 0.85)';
+    this._roundRect(ctx, barX, barY, barW, barH, 3);
+    ctx.fill();
+    let fillColor;
+    if (ratio > 0.6) fillColor = '#3f8b3f';
+    else if (ratio > 0.3) fillColor = '#c9a227';
+    else if (ratio > 0) fillColor = '#a63d2f';
+    else fillColor = '#444';
+    ctx.fillStyle = fillColor;
+    this._roundRect(ctx, barX + 1, barY + 1, Math.max(0, (barW - 2) * ratio), barH - 2, 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(232, 220, 200, 0.55)';
+    ctx.lineWidth = 1;
+    this._roundRect(ctx, barX + 0.5, barY + 0.5, barW - 1, barH - 1, 3);
+    ctx.stroke();
+    const isDm = this.isDm();
+    const isOwnChar = !isDm && stats.fromCharacter;
+    if (isDm || isOwnChar) {
+      const txt = `${stats.hpCurrent}/${stats.hpMax}`;
+      ctx.fillStyle = '#f5efe4';
+      ctx.font = `bold ${Math.max(9, Math.round(barH * 0.85))}px Cinzel, Georgia, serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.shadowColor = 'rgba(0,0,0,0.9)';
+      ctx.shadowBlur = 2;
+      ctx.fillText(txt, barX + barW / 2, barY + barH / 2 + 0.5);
+      ctx.shadowBlur = 0;
+      ctx.textAlign = 'start';
+      ctx.textBaseline = 'alphabetic';
+    }
+    ctx.restore();
+  },
+
+  _roundRect(ctx, x, y, w, h, r) {
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.lineTo(x + w - rr, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+    ctx.lineTo(x + w, y + h - rr);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+    ctx.lineTo(x + rr, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+    ctx.lineTo(x, y + rr);
+    ctx.quadraticCurveTo(x, y, x + rr, y);
+    ctx.closePath();
+  },
+
   drawToken(ctx, token, gs) {
     const tx = token.x * gs;
     const ty = token.y * gs;
@@ -672,14 +926,7 @@ const BattleMap = {
     const radius = (size / 2) - 3;
 
     const stats = this.getTokenStats(token);
-    if (stats.hpMax > 0) {
-      const ratio = Math.max(0, Math.min(1, stats.hpCurrent / stats.hpMax));
-      const barW = size - 8;
-      ctx.fillStyle = 'rgba(0,0,0,0.5)';
-      ctx.fillRect(tx + 4, ty + 2, barW, 5);
-      ctx.fillStyle = ratio > 0.5 ? '#4a6b3a' : ratio > 0.25 ? '#c9a227' : '#a63d2f';
-      ctx.fillRect(tx + 4, ty + 2, barW * ratio, 5);
-    }
+    this.drawHpBar(ctx, token, stats, tx, ty, size, gs);
 
     const img = token.image_url ? this.tokenImageCache.get(token.image_url) : null;
     if (img) {
@@ -844,8 +1091,10 @@ const BattleMap = {
 
     if (this.isDm() && (this.toolMode === 'terrain-paint' || this.toolMode === 'terrain-erase')) {
       this.isPaintingTerrain = true;
-      if (this.toolMode === 'terrain-paint') MapZones.paintTerrainCell(cell.x, cell.y);
-      else MapZones.eraseTerrainCell(cell.x, cell.y);
+      const r = this.getFogBrushRadius();
+      if (this.toolMode === 'terrain-paint') MapZones.paintTerrainCell(cell.x, cell.y, r);
+      else MapZones.eraseTerrainCell(cell.x, cell.y, r);
+      this.render();
       return;
     }
 
@@ -944,8 +1193,9 @@ const BattleMap = {
 
     if (this.isPaintingTerrain) {
       const cell = this.cellAt(mx, my);
-      if (this.toolMode === 'terrain-paint') MapZones.paintTerrainCell(cell.x, cell.y);
-      else MapZones.eraseTerrainCell(cell.x, cell.y);
+      const r = this.getFogBrushRadius();
+      if (this.toolMode === 'terrain-paint') MapZones.paintTerrainCell(cell.x, cell.y, r);
+      else MapZones.eraseTerrainCell(cell.x, cell.y, r);
       this.render();
       return;
     }
@@ -1249,8 +1499,12 @@ const BattleMap = {
     } else if (action === '2') {
       App.socket?.emit('map-update-token', { id: token.id, is_locked: !token.is_locked });
     } else if (action === '3') {
-      this.pendingTokenImageId = token.id;
-      document.getElementById('token-image-file')?.click();
+      if (typeof TokenLibrary !== 'undefined') {
+        TokenLibrary.open(token.id);
+      } else {
+        this.pendingTokenImageId = token.id;
+        document.getElementById('token-image-file')?.click();
+      }
     } else if (action === '4') {
       this.showLinkTokenDialog(token);
     } else if (action === '5') {

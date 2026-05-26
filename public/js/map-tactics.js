@@ -1,4 +1,11 @@
 // Grid tactics: distance, range, line of sight (browser + Node)
+// In the browser MapZoneTypes is provided by a sibling <script>; in Node we eagerly
+// require the module and attach it to globalThis so the rest of this file can use the
+// bare identifier without re-declaring it (which would clash with the browser's const).
+if (typeof globalThis.MapZoneTypes === 'undefined' && typeof require !== 'undefined') {
+  try { globalThis.MapZoneTypes = require('./map-zone-types.js'); } catch (_e) { /* browser */ }
+}
+
 const MapTactics = {
   FT_PER_SQUARE: 5,
 
@@ -369,6 +376,69 @@ const MapTactics = {
       const a = this.tokenAnchor(t);
       return set.has(this.cellKey(a.x, a.y));
     });
+  },
+
+  buildHazardIndex(zones) {
+    const types = (typeof MapZoneTypes !== 'undefined') ? MapZoneTypes.TERRAIN : null;
+    if (!types) return new Map();
+    const index = new Map();
+    (zones || []).forEach((zone) => {
+      const t = zone.terrainType;
+      const def = types[t];
+      const hazard = def?.hazard;
+      if (!hazard) return;
+      const cells = zone.cells?.length
+        ? zone.cells
+        : this.resolveZoneCells(zone, 999, 999);
+      cells.forEach((key) => {
+        let list = index.get(key);
+        if (!list) {
+          list = [];
+          index.set(key, list);
+        }
+        if (!list.find((h) => h.terrainType === t)) {
+          list.push({ terrainType: t, ...hazard });
+        }
+      });
+    });
+    return index;
+  },
+
+  hazardsAtCell(hazardIndex, x, y) {
+    return hazardIndex?.get(this.cellKey(x, y)) || [];
+  },
+
+  tokenOccupiedCellsAt(token, x, y) {
+    const size = parseInt(token?.size, 10) || 1;
+    const cells = [];
+    for (let dy = 0; dy < size; dy++) {
+      for (let dx = 0; dx < size; dx++) {
+        cells.push({ x: x + dx, y: y + dy });
+      }
+    }
+    return cells;
+  },
+
+  hazardsTouchedByMove(token, fromX, fromY, toX, toY, hazardIndex) {
+    if (!hazardIndex || !hazardIndex.size) return [];
+    const size = parseInt(token?.size, 10) || 1;
+    const line = this.bresenhamLine(fromX, fromY, toX, toY);
+    const seen = new Set();
+    const result = [];
+    for (let i = 0; i < line.length; i++) {
+      const { x, y } = line[i];
+      for (let dy = 0; dy < size; dy++) {
+        for (let dx = 0; dx < size; dx++) {
+          const hazards = this.hazardsAtCell(hazardIndex, x + dx, y + dy);
+          for (const h of hazards) {
+            if (seen.has(h.terrainType)) continue;
+            seen.add(h.terrainType);
+            result.push(h);
+          }
+        }
+      }
+    }
+    return result;
   }
 };
 

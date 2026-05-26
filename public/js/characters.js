@@ -902,7 +902,32 @@ const Characters = {
         }).join('')}
       </details>` : '';
 
-    return `<div class="sheet-section sheet-spells-section" id="sheet-spells-root">
+    const maxSlots = DndSpells.getMaxSpellSlots(c.char_class, c.level);
+    const remaining = DndSpells.getRemainingSlots(c);
+    const slotsBar = Object.keys(maxSlots).length
+      ? `<div class="spell-slots-bar">
+          <strong>Sloty:</strong>
+          ${Object.keys(maxSlots).sort().map((lv) => {
+            const rem = remaining[lv] || 0;
+            const max = maxSlots[lv] || 0;
+            const dots = Array.from({ length: max }, (_, i) =>
+              `<button type="button" class="slot-dot ${i < rem ? 'is-full' : 'is-used'}" ${canEdit ? `data-slot-toggle="${lv}" data-slot-idx="${i}"` : 'disabled'} title="Slot ${lv}"></button>`
+            ).join('');
+            return `<span class="spell-slot-group" title="Sloty poziom ${lv}">
+              <span class="slot-level-label">${lv}</span>
+              ${dots}
+              <small>${rem}/${max}</small>
+            </span>`;
+          }).join('')}
+        </div>` : '';
+
+    const restButtons = canEdit
+      ? `<div class="spell-rest-buttons">
+          <button type="button" class="btn btn-sm btn-secondary" data-rest="short" title="Krótki odpoczynek (1h) — Warlock odzyskuje sloty">🛌 Krótki odp.</button>
+          <button type="button" class="btn btn-sm btn-primary" data-rest="long" title="Długi odpoczynek (8h) — pełne HP i sloty">😴 Długi odp.</button>
+        </div>` : '';
+
+    return `<div class="sheet-section sheet-spells-section" id="sheet-spells-root" data-character-id="${escapeHtml(c.id)}">
       <h3>🔮 Czary</h3>
       <div class="spell-stats-bar">
         <span><small>Cecha</small><br><strong>${escapeHtml(ABILITY_NAMES_PL[spellAb] || spellAb)}</strong></span>
@@ -910,6 +935,8 @@ const Characters = {
         <span><small>Atak czarem</small><br><strong>${modString(atk)}</strong></span>
         <span><small>Max poziom</small><br><strong>${maxSpellLvl === 0 ? 'Cantrip' : maxSpellLvl}</strong></span>
       </div>
+      ${slotsBar}
+      ${restButtons}
       <div class="sheet-spells-list">${listHtml}</div>
       ${catalogHtml}
     </div>`;
@@ -988,7 +1015,56 @@ const Characters = {
       root.querySelectorAll('[data-spell-remove]').forEach((btn) => {
         btn.addEventListener('click', () => this.removeSpell(c.id, btn.dataset.spellRemove));
       });
+      root.querySelectorAll('[data-slot-toggle]').forEach((btn) => {
+        btn.addEventListener('click', () => this.toggleSpellSlot(c.id, parseInt(btn.dataset.slotToggle, 10), parseInt(btn.dataset.slotIdx, 10)));
+      });
+      root.querySelectorAll('[data-rest]').forEach((btn) => {
+        btn.addEventListener('click', () => this.takeRest(c.id, btn.dataset.rest));
+      });
     }
+  },
+
+  async toggleSpellSlot(charId, slotLevel, slotIdx) {
+    const c = await apiFetch(`/characters/${charId}`);
+    if (!c) return;
+    const max = DndSpells.getMaxSpellSlots(c.char_class, c.level);
+    if (!(max[slotLevel] || 0)) return;
+    const state = DndSpells.parseSlotsState(c);
+    const used = parseInt(state.used[slotLevel] || 0, 10);
+    const isCurrentlyFull = slotIdx < (max[slotLevel] - used);
+    if (isCurrentlyFull) {
+      state.used[slotLevel] = Math.min(max[slotLevel], used + 1);
+    } else {
+      state.used[slotLevel] = Math.max(0, used - 1);
+    }
+    App.socket?.emit('character-set-slots', { characterId: charId, slots: state });
+    // optymistyczna aktualizacja widoku
+    await this.openSheet(charId);
+  },
+
+  async takeRest(charId, type) {
+    const label = type === 'long' ? 'długi' : 'krótki';
+    if (!confirm(`Wykonać ${label} odpoczynek? Sloty${type === 'long' ? ' + HP' : (await this._isWarlock(charId)) ? '' : ' (tylko Warlock odzyskuje sloty)'} zostaną odnowione.`)) return;
+    if (type === 'long') {
+      App.socket?.emit('character-long-rest', { characterId: charId });
+    } else {
+      const hd = parseInt(prompt('Ile Kości Życia spędzić na leczenie? (0 = tylko odpoczynek)', '0') || '0', 10);
+      App.socket?.emit('character-short-rest', { characterId: charId, hitDiceSpent: hd });
+    }
+    setTimeout(() => this.openSheet(charId), 300);
+  },
+
+  async _isWarlock(charId) {
+    try {
+      const c = await apiFetch(`/characters/${charId}`);
+      return c?.char_class === 'Warlock';
+    } catch (_e) { return false; }
+  },
+
+  refreshOpenSheetIfMatches(charId) {
+    if (!charId) return;
+    const open = document.querySelector(`#sheet-spells-root[data-character-id="${charId}"]`);
+    if (open) this.openSheet(charId);
   },
 
   async deleteCharacter(charId) {
