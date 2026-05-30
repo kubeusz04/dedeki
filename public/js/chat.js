@@ -14,6 +14,7 @@ const Chat = {
       this.syncWhisperField(e.target.value, 'whisper-target');
     });
     document.getElementById('btn-load-older-chat')?.addEventListener('click', () => this.loadOlder());
+    document.getElementById('btn-clear-chat')?.addEventListener('click', () => this.clearChat());
     document.getElementById('btn-map-send-chat')?.addEventListener('click', () => this.sendMessage(true));
     document.getElementById('map-chat-input')?.addEventListener('keypress', (e) => {
       if (e.key === 'Enter') this.sendMessage(true);
@@ -74,6 +75,27 @@ const Chat = {
 
   clearMessageContainers() {
     this.getMessageContainers().forEach((c) => { c.innerHTML = ''; });
+  },
+
+  onChatCleared(by) {
+    this.clearMessageContainers();
+    this.oldestLoadedAt = null;
+    this.hasMore = false;
+    this.updateLoadOlderButton();
+    const label = by ? `Mistrz Gry (${by}) wyczyścił historię czatu.` : 'Historia czatu została wyczyszczona.';
+    this.addSystemMessage({ content: label });
+  },
+
+  async clearChat() {
+    if (!this.isDm() || !App.currentCampaign) return;
+    if (!confirm('Wyczyścić całą historię czatu tej kampanii?\n\nWszyscy gracze stracą widoczność poprzednich wiadomości. Tej operacji nie można cofnąć.')) {
+      return;
+    }
+    try {
+      await apiFetch(`/campaigns/${App.currentCampaign.id}/messages`, { method: 'DELETE' });
+    } catch (err) {
+      showToast(err.message || 'Nie udało się wyczyścić czatu', 'error');
+    }
   },
 
   isDm() {
@@ -532,8 +554,13 @@ const Chat = {
   addSystemMessage(data) {
     this.appendMessageToContainers(() => {
       const msg = document.createElement('div');
-      msg.className = 'chat-msg system';
-      msg.innerHTML = `${data.type === 'initiative' ? '⚔️' : '📢'} ${escapeHtml(data.content)}`;
+      msg.className = 'chat-msg system' + (data.type === 'weather' ? ' chat-msg-weather' : '');
+      const icon = data.type === 'initiative' ? '⚔️'
+        : data.type === 'weather' ? '🌦️'
+        : data.type === 'join' ? '👋'
+        : data.type === 'leave' ? '👋'
+        : '📢';
+      msg.innerHTML = `${icon} ${escapeHtml(data.content)}`;
       return msg;
     });
   },

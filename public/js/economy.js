@@ -171,7 +171,7 @@ const Economy = {
       else if (cat === 'custom') {
         const customs = (typeof DMEconomy !== 'undefined' ? DMEconomy.customItems : []) || [];
         if (!customs.length) {
-          grid.innerHTML = '<p class="info-text">MG nie utworzył jeszcze żadnych własnych przedmiotów. Otwórz panel „💰 Ekonomia → 🛠️ Własny przedmiot".</p>';
+          grid.innerHTML = '<p class="info-text">MG nie utworzył jeszcze żadnych własnych przedmiotów. Zakładka „💰 Ekonomia” → 🛠️ Własny przedmiot.</p>';
           return;
         }
         list = customs.map((cu) => ({ id: `custom:${cu.id}`, namePl: cu.name }));

@@ -7,14 +7,20 @@ const bcrypt = require('bcryptjs');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const multer = require('multer');
+const archiver = require('archiver');
+const { v4: uuidv4 } = require('uuid');
 
 const {
   initializeDatabase, userOps, campaignOps, characterOps, messageOps, npcOps,
   initiativeOps, noteOps, mapOps, combatOps, diceLogOps, conditionOps,
-  merchantOps, lootTableOps, customItemOps, tokenImageOps, lootGrantOps, economyOps, musicOps, resolveEntityStats,
-  mapPresetOps
+  merchantOps, lootTableOps, customItemOps, customMonsterOps, questOps, handoutOps, worldStateOps, soundOps, tokenImageOps, lootGrantOps, economyOps, musicOps, musicPlaylistOps, resolveEntityStats,
+  mapPresetOps, collectCampaignSnapshot
 } = require('./database');
-const { generateToken, authMiddleware, socketAuthMiddleware } = require('./auth');
+const { generateToken, authMiddleware, socketAuthMiddleware, verifyToken } = require('./auth');
+const { runAiSuggest } = require('./lib/ai-suggest-server');
+const { restoreCampaignFromSnapshot } = require('./lib/campaign-import');
+const youtubeImport = require('./lib/youtube-import');
+const AdmZip = require('adm-zip');
 
 const app = express();
 const server = http.createServer(app);
@@ -30,10 +36,14 @@ const mapUploadsDir = path.join(__dirname, 'public', 'uploads', 'maps');
 const tokenUploadsDir = path.join(__dirname, 'public', 'uploads', 'tokens');
 const characterUploadsDir = path.join(__dirname, 'public', 'uploads', 'characters');
 const musicUploadsDir = path.join(__dirname, 'public', 'uploads', 'music');
+const soundUploadsDir = path.join(__dirname, 'public', 'uploads', 'sounds');
+const handoutUploadsDir = path.join(__dirname, 'private_uploads', 'handouts');
 fs.mkdirSync(mapUploadsDir, { recursive: true });
 fs.mkdirSync(tokenUploadsDir, { recursive: true });
 fs.mkdirSync(characterUploadsDir, { recursive: true });
 fs.mkdirSync(musicUploadsDir, { recursive: true });
+fs.mkdirSync(soundUploadsDir, { recursive: true });
+fs.mkdirSync(handoutUploadsDir, { recursive: true });
 
 const MUSIC_MIME = new Set([
   'audio/mpeg', 'audio/mp3', 'audio/ogg', 'audio/wav', 'audio/webm',
@@ -43,7 +53,62 @@ const MUSIC_MIME = new Set([
 const musicPlaybackByCampaign = new Map();
 
 function defaultMusicPlayback() {
-  return { trackId: null, isPlaying: false, positionSec: 0, updatedAt: Date.now() };
+  return {
+    trackId: null,
+    isPlaying: false,
+    positionSec: 0,
+    updatedAt: Date.now(),
+    playlistId: null,
+    shuffle: false,
+    autoAdvance: true,
+    shuffleOrder: []
+  };
+}
+
+function shuffleTrackIds(trackIds) {
+  const arr = [...trackIds];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+async function resolvePlaylistOrder(playlistId, shuffle) {
+  const pl = await musicPlaylistOps.findById(playlistId);
+  if (!pl?.track_ids?.length) return { trackIds: [], shuffleOrder: [] };
+  const trackIds = pl.track_ids;
+  const shuffleOrder = shuffle ? shuffleTrackIds(trackIds) : trackIds;
+  return { trackIds, shuffleOrder, playlist: pl };
+}
+
+async function advancePlaylistTrack(campaignId, state, direction = 1) {
+  if (!state?.playlistId) return null;
+  const { shuffleOrder, trackIds } = await resolvePlaylistOrder(state.playlistId, !!state.shuffle);
+  const order = shuffleOrder.length ? shuffleOrder : trackIds;
+  if (!order.length) return null;
+
+  const currentIdx = order.indexOf(state.trackId);
+  let nextIdx = currentIdx < 0 ? 0 : currentIdx + direction;
+  if (nextIdx >= order.length) nextIdx = 0;
+  if (nextIdx < 0) nextIdx = order.length - 1;
+
+  const track = await musicOps.findById(order[nextIdx]);
+  if (!track || track.campaign_id !== campaignId) return null;
+  return {
+    trackId: track.id,
+    shuffleOrder: state.shuffle ? order : []
+  };
+}
+
+function clearPlaylistFields(state) {
+  return {
+    ...state,
+    playlistId: null,
+    shuffle: false,
+    autoAdvance: true,
+    shuffleOrder: []
+  };
 }
 
 function getSyncedMusicPosition(playback) {
@@ -54,10 +119,14 @@ function getSyncedMusicPosition(playback) {
 }
 
 async function buildMusicPayload(campaignId) {
-  const tracks = await musicOps.findByCampaign(campaignId);
+  const [tracks, playlists] = await Promise.all([
+    musicOps.findByCampaign(campaignId),
+    musicPlaylistOps.listByCampaign(campaignId)
+  ]);
   const playback = musicPlaybackByCampaign.get(campaignId) || defaultMusicPlayback();
   return {
     tracks,
+    playlists,
     playback: {
       ...playback,
       syncedPositionSec: getSyncedMusicPosition(playback)
@@ -150,6 +219,26 @@ async function afterInitiativeTurnChange(campaignId) {
     } catch (hzErr) {
       console.error('hazard-on-turn-start', hzErr);
     }
+    // Tick stanów (czasy trwania w rundach) na początku tury aktywnego tokenu
+    try {
+      const tickRes = await mapOps.tickConditionsForToken(active.map_token_id);
+      if (tickRes.expired.length) {
+        const payload = await buildMapPayload(campaignId);
+        io.to(campaignId).emit('map-update', payload);
+        for (const exp of tickRes.expired) {
+          io.to(campaignId).emit('dice-log-entry', {
+            type: 'condition',
+            text: `${exp.emoji || '⚠️'} ${active.entity_name}: efekt „${exp.name}" wygasł`,
+            at: Date.now()
+          });
+        }
+      } else if (tickRes.token && tickRes.remaining.some((c) => c.durationLeft != null)) {
+        // tylko dekrement bez wygasłych — wyślij update tokenów
+        io.to(campaignId).emit('map-update', await buildMapPayload(campaignId));
+      }
+    } catch (cErr) {
+      console.error('conditions-tick', cErr);
+    }
   }
 
   await broadcastCombatUpdate(campaignId);
@@ -228,6 +317,67 @@ function tryDeleteTokenLibraryImage(relativePath) {
   if (!relativePath || !relativePath.startsWith('/uploads/tokens/')) return;
   const candidate = path.normalize(path.join(__dirname, 'public', relativePath));
   if (!candidate.startsWith(tokenUploadsDir)) return;
+  fs.promises.unlink(candidate).catch(() => {});
+}
+
+const HANDOUT_ALLOWED_MIME = new Set([
+  'image/png', 'image/jpeg', 'image/webp', 'image/gif',
+  'application/pdf'
+]);
+const handoutUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, handoutUploadsDir),
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname || '').toLowerCase();
+      const allowedExt = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.pdf'];
+      const safeExt = allowedExt.includes(ext) ? ext : '.bin';
+      cb(null, `handout-${req.params.id}-${Date.now()}${safeExt}`);
+    }
+  }),
+  limits: { fileSize: 15 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (!HANDOUT_ALLOWED_MIME.has(file.mimetype)) {
+      return cb(new Error('Dozwolone: PNG, JPG, WEBP, GIF, PDF'));
+    }
+    cb(null, true);
+  }
+});
+
+function tryDeleteHandoutFile(relativePath) {
+  if (!relativePath || !relativePath.startsWith('/handout-files/')) return;
+  const filename = path.basename(relativePath);
+  const candidate = path.normalize(path.join(handoutUploadsDir, filename));
+  if (!candidate.startsWith(handoutUploadsDir)) return;
+  fs.promises.unlink(candidate).catch(() => {});
+}
+
+const SOUND_ALLOWED_MIME = new Set([
+  'audio/mpeg', 'audio/mp3', 'audio/ogg', 'audio/wav', 'audio/wave',
+  'audio/webm', 'audio/x-wav', 'audio/mp4', 'audio/aac'
+]);
+const soundUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, soundUploadsDir),
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname || '').toLowerCase();
+      const allowedExt = ['.mp3', '.ogg', '.wav', '.webm', '.m4a', '.aac'];
+      const safeExt = allowedExt.includes(ext) ? ext : '.mp3';
+      cb(null, `snd-${req.params.id}-${Date.now()}${safeExt}`);
+    }
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (SOUND_ALLOWED_MIME.has(file.mimetype) || (file.mimetype || '').startsWith('audio/')) {
+      return cb(null, true);
+    }
+    cb(new Error('Dozwolone pliki audio: MP3, OGG, WAV, WebM, M4A'));
+  }
+});
+
+function tryDeleteSoundFile(relativePath) {
+  if (!relativePath || !relativePath.startsWith('/uploads/sounds/')) return;
+  const candidate = path.normalize(path.join(__dirname, 'public', relativePath));
+  if (!candidate.startsWith(soundUploadsDir)) return;
   fs.promises.unlink(candidate).catch(() => {});
 }
 
@@ -386,6 +536,41 @@ const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 30,
   message: { error: 'Za dużo prób, spróbuj ponownie za 15 minut' }
+});
+
+const aiSuggestLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  message: { error: 'Za dużo zapytań AI — poczekaj chwilę' }
+});
+
+const musicYoutubeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  message: { error: 'Za dużo importów YouTube — poczekaj minutę' }
+});
+
+// ============ AI (Gemini) — tylko MG ============
+app.post('/api/ai/suggest', authMiddleware, aiSuggestLimiter, async (req, res) => {
+  try {
+    const { campaignId, type, context } = req.body || {};
+    if (!campaignId || !type) {
+      return res.status(400).json({ error: 'Wymagane: campaignId, type' });
+    }
+    if (!(await campaignOps.isDm(campaignId, req.user.id))) {
+      return res.status(403).json({ error: 'Tylko Mistrz Gry może używać podpowiedzi AI' });
+    }
+    const campaign = await campaignOps.findById(campaignId);
+    const enriched = {
+      ...(context && typeof context === 'object' ? context : {}),
+      campaignName: campaign?.name || ''
+    };
+    const result = await runAiSuggest(String(type), enriched);
+    res.json({ result });
+  } catch (err) {
+    console.error('AI suggest error:', err.message);
+    res.status(500).json({ error: err.message || 'Błąd podpowiedzi AI' });
+  }
 });
 
 // ============ AUTH ROUTES ============
@@ -768,6 +953,24 @@ app.get('/api/campaigns/:id/messages', authMiddleware, async (req, res) => {
   res.json(messages);
 });
 
+app.delete('/api/campaigns/:id/messages', authMiddleware, async (req, res) => {
+  const campaignId = req.params.id;
+  const membership = await campaignOps.isMember(campaignId, req.user.id);
+  if (!membership) return res.status(403).json({ error: 'Brak dostępu' });
+  if (!(await campaignOps.isDm(campaignId, req.user.id))) {
+    return res.status(403).json({ error: 'Tylko Mistrz Gry może wyczyścić czat' });
+  }
+  try {
+    const deleted = await messageOps.deleteAllByCampaign(campaignId);
+    const by = req.user.display_name || req.user.username;
+    io.to(campaignId).emit('chat-cleared', { campaignId, by });
+    res.json({ message: 'Czat wyczyszczony', deleted });
+  } catch (err) {
+    console.error('clear chat error:', err);
+    res.status(500).json({ error: 'Błąd czyszczenia czatu' });
+  }
+});
+
 // ============ DICE LOG ROUTES ============
 app.get('/api/campaigns/:id/dice-log', authMiddleware, async (req, res) => {
   const membership = await campaignOps.isMember(req.params.id, req.user.id);
@@ -1025,9 +1228,11 @@ app.get('/api/campaigns/:id/music', authMiddleware, async (req, res) => {
     return res.status(403).json({ error: 'Brak dostępu' });
   }
   const tracks = await musicOps.findByCampaign(req.params.id);
+  const playlists = await musicPlaylistOps.listByCampaign(req.params.id);
   const playback = musicPlaybackByCampaign.get(req.params.id) || defaultMusicPlayback();
   res.json({
     tracks,
+    playlists,
     playback: { ...playback, syncedPositionSec: getSyncedMusicPosition(playback) }
   });
 });
@@ -1061,6 +1266,89 @@ app.post('/api/campaigns/:id/music', authMiddleware, async (req, res) => {
   });
 });
 
+app.post('/api/campaigns/:id/music/youtube', authMiddleware, musicYoutubeLimiter, async (req, res) => {
+  if (!(await campaignOps.isDm(req.params.id, req.user.id))) {
+    return res.status(403).json({ error: 'Tylko Mistrz Gry może dodawać muzykę' });
+  }
+
+  const rawUrl = (req.body?.url || '').trim();
+  const customTitle = (req.body?.title || '').trim().slice(0, 120);
+  const videoId = youtubeImport.parseYoutubeId(rawUrl);
+
+  if (!videoId) {
+    return res.status(400).json({ error: 'Nieprawidłowy link YouTube' });
+  }
+
+  const sourceUrl = youtubeImport.buildYoutubeUrl(videoId);
+
+  try {
+    const existing = await musicOps.findByYoutubeId(req.params.id, videoId);
+    if (existing) {
+      return res.json({ ...existing, duplicate: true });
+    }
+
+    await youtubeImport.assertYtdlpAvailable();
+
+    let metaTitle = customTitle;
+    if (!metaTitle) {
+      try {
+        const meta = await youtubeImport.fetchMetadata(sourceUrl);
+        metaTitle = meta.title;
+        if (meta.duration > youtubeImport.MAX_DURATION_SEC) {
+          return res.status(400).json({
+            error: `Film jest za długi (max ${Math.floor(youtubeImport.MAX_DURATION_SEC / 60)} min)`
+          });
+        }
+      } catch (metaErr) {
+        console.warn('YouTube metadata fetch failed:', metaErr.message);
+        metaTitle = `YouTube ${videoId}`;
+      }
+    }
+
+    const filename = `music-${req.params.id}-yt-${videoId}-${Date.now()}.mp3`;
+    const destPath = path.join(musicUploadsDir, filename);
+    const fileUrl = `/uploads/music/${filename}`;
+
+    let downloaded;
+    try {
+      downloaded = await youtubeImport.downloadAudioToFile({ videoId, destPath });
+    } catch (dlErr) {
+      tryDeleteMusicFile(fileUrl);
+      throw dlErr;
+    }
+
+    const track = await musicOps.create(req.params.id, req.user.id, {
+      title: metaTitle || `YouTube ${videoId}`,
+      file_url: fileUrl,
+      file_size: downloaded.fileSize,
+      mime_type: downloaded.mimeType,
+      source_type: 'youtube',
+      youtube_id: videoId,
+      source_url: sourceUrl
+    });
+
+    broadcastMusicSync(req.params.id);
+    res.json(track);
+  } catch (err) {
+    console.error('YouTube music import error:', err);
+    const code = err.code || '';
+    if (code === 'YTDLP_DISABLED' || code === 'YTDLP_MISSING') {
+      return res.status(503).json({
+        error: err.message || 'Import YouTube niedostępny — zainstaluj yt-dlp i ffmpeg'
+      });
+    }
+    if (code === 'YTDLP_TIMEOUT') {
+      return res.status(504).json({ error: err.message || 'Przekroczono czas pobierania' });
+    }
+    if (code === 'YTDLP_FAILED') {
+      return res.status(502).json({
+        error: err.message || 'Nie udało się pobrać audio z YouTube'
+      });
+    }
+    res.status(500).json({ error: err.message || 'Błąd importu YouTube' });
+  }
+});
+
 app.delete('/api/campaigns/:id/music/:trackId', authMiddleware, async (req, res) => {
   if (!(await campaignOps.isDm(req.params.id, req.user.id))) {
     return res.status(403).json({ error: 'Tylko Mistrz Gry może usuwać muzykę' });
@@ -1081,11 +1369,138 @@ app.delete('/api/campaigns/:id/music/:trackId', authMiddleware, async (req, res)
   res.json({ message: 'Utwór usunięty' });
 });
 
+app.get('/api/campaigns/:id/music/playlists', authMiddleware, async (req, res) => {
+  if (!(await campaignOps.isMember(req.params.id, req.user.id))) {
+    return res.status(403).json({ error: 'Brak dostępu' });
+  }
+  res.json(await musicPlaylistOps.listByCampaign(req.params.id));
+});
+
+app.post('/api/campaigns/:id/music/playlists', authMiddleware, async (req, res) => {
+  if (!(await campaignOps.isDm(req.params.id, req.user.id))) {
+    return res.status(403).json({ error: 'Tylko Mistrz Gry może tworzyć playlisty' });
+  }
+  const trackIds = Array.isArray(req.body?.track_ids) ? req.body.track_ids : (req.body?.trackIds || []);
+  const validIds = [];
+  for (const tid of trackIds) {
+    const track = await musicOps.findById(tid);
+    if (track && track.campaign_id === req.params.id) validIds.push(track.id);
+  }
+  try {
+    const playlist = await musicPlaylistOps.create(req.params.id, {
+      name: req.body?.name,
+      shuffle: !!req.body?.shuffle,
+      auto_advance: req.body?.auto_advance !== false,
+      track_ids: validIds
+    });
+    broadcastMusicSync(req.params.id);
+    res.json(playlist);
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Nie udało się utworzyć playlisty' });
+  }
+});
+
+app.put('/api/music/playlists/:id', authMiddleware, async (req, res) => {
+  const pl = await musicPlaylistOps.findById(req.params.id);
+  if (!pl) return res.status(404).json({ error: 'Playlista nie znaleziona' });
+  if (!(await campaignOps.isDm(pl.campaign_id, req.user.id))) {
+    return res.status(403).json({ error: 'Tylko Mistrz Gry' });
+  }
+  let trackIds;
+  if (req.body?.track_ids !== undefined || req.body?.trackIds !== undefined) {
+    const raw = req.body.track_ids || req.body.trackIds || [];
+    trackIds = [];
+    for (const tid of raw) {
+      const track = await musicOps.findById(tid);
+      if (track && track.campaign_id === pl.campaign_id) trackIds.push(track.id);
+    }
+  }
+  const updated = await musicPlaylistOps.update(req.params.id, {
+    name: req.body?.name,
+    shuffle: req.body?.shuffle,
+    auto_advance: req.body?.auto_advance,
+    track_ids: trackIds
+  });
+  broadcastMusicSync(pl.campaign_id);
+  res.json(updated);
+});
+
+app.delete('/api/music/playlists/:id', authMiddleware, async (req, res) => {
+  const pl = await musicPlaylistOps.findById(req.params.id);
+  if (!pl) return res.status(404).json({ error: 'Playlista nie znaleziona' });
+  if (!(await campaignOps.isDm(pl.campaign_id, req.user.id))) {
+    return res.status(403).json({ error: 'Tylko Mistrz Gry' });
+  }
+  await musicPlaylistOps.delete(req.params.id);
+  const playback = musicPlaybackByCampaign.get(pl.campaign_id);
+  if (playback?.playlistId === pl.id) {
+    musicPlaybackByCampaign.set(pl.campaign_id, defaultMusicPlayback());
+  }
+  broadcastMusicSync(pl.campaign_id);
+  res.json({ ok: true });
+});
+
 // ============ SOCKET.IO ============
 io.use(socketAuthMiddleware);
 
 // Track online users per campaign
 const campaignRooms = new Map();
+// Per-campaign ambient mixer state: { sound_id: { volume, started_at } }.
+// Persists for the lifetime of the server process (not in DB).
+const ambientState = new Map();
+function getAmbientState(campaignId) {
+  if (!ambientState.has(campaignId)) ambientState.set(campaignId, {});
+  return ambientState.get(campaignId);
+}
+
+// In-memory sesje grupowych rzutów (zerowane przy restarcie serwera).
+// sessionId -> { campaignId, dmUserId, type, payload, dc, label, advantage, disadvantage, participants[], createdAt }
+const groupRollSessions = new Map();
+const GROUP_ROLL_TTL_MS = 5 * 60 * 1000;
+
+async function finalizeGroupRoll(session) {
+  if (!session) return;
+  groupRollSessions.delete(session.id);
+
+  const rolled = session.participants.filter((p) => p.status === 'rolled');
+  let summaryHead;
+  if (typeof session.dc === 'number' && session.dc > 0) {
+    const successes = rolled.filter((p) => p.result?.success).length;
+    summaryHead = `🎯 Grupowy rzut: ${session.label} — DC ${session.dc} → ${successes}/${rolled.length} sukces`;
+  } else {
+    summaryHead = `🎯 Grupowy rzut: ${session.label} — ${rolled.length} rzutów`;
+  }
+
+  const lines = session.participants.map((p) => {
+    if (p.status === 'skipped') return `• ${p.characterName}: pominięto`;
+    if (p.status === 'pending')  return `• ${p.characterName}: brak odpowiedzi`;
+    const r = p.result || {};
+    const succ = r.success === true ? ' ✅' : r.success === false ? ' ❌' : '';
+    return `• ${p.characterName}: ${r.total ?? '?'}${succ}`;
+  });
+
+  const body = summaryHead + '\n' + lines.join('\n');
+
+  try {
+    const dmUser = await userOps.findById(session.dmUserId);
+    const dmName = dmUser?.display_name || dmUser?.username || 'MG';
+    const msg = await messageOps.create(
+      session.campaignId, session.dmUserId, dmName,
+      body, 'system', false, '',
+      JSON.stringify({ kind: 'group-roll', sessionId: session.id, label: session.label, dc: session.dc, results: session.participants })
+    );
+    io.to(session.campaignId).emit('chat-message', msg);
+  } catch (e) {
+    console.error('finalizeGroupRoll chat post error:', e);
+  }
+
+  io.to(session.campaignId).emit('group-roll-complete', {
+    sessionId: session.id,
+    label: session.label,
+    dc: session.dc,
+    participants: session.participants
+  });
+}
 
 io.on('connection', (socket) => {
   console.log(`User connected: ${socket.user.username}`);
@@ -1135,11 +1550,63 @@ io.on('connection', (socket) => {
     let state = musicPlaybackByCampaign.get(campaignId) || defaultMusicPlayback();
     const action = data?.action;
 
-    if (action === 'play') {
+    if (action === 'play-playlist') {
+      const pl = await musicPlaylistOps.findById(data.playlistId);
+      if (!pl || pl.campaign_id !== campaignId) return;
+      if (!pl.track_ids.length) return;
+      const shuffle = data.shuffle !== undefined ? !!data.shuffle : !!pl.shuffle;
+      const autoAdvance = data.autoAdvance !== undefined ? !!data.autoAdvance : !!pl.auto_advance;
+      const { shuffleOrder } = await resolvePlaylistOrder(pl.id, shuffle);
+      let startId = data.trackId && pl.track_ids.includes(data.trackId) ? data.trackId : shuffleOrder[0];
+      const track = await musicOps.findById(startId);
+      if (!track || track.campaign_id !== campaignId) return;
+      state = {
+        trackId: track.id,
+        isPlaying: true,
+        positionSec: Math.max(0, parseFloat(data.positionSec) || 0),
+        updatedAt: Date.now(),
+        playlistId: pl.id,
+        shuffle,
+        autoAdvance,
+        shuffleOrder
+      };
+    } else if (action === 'play') {
       const track = await musicOps.findById(data.trackId);
       if (!track || track.campaign_id !== campaignId) return;
       const pos = Math.max(0, parseFloat(data.positionSec) || 0);
-      state = { trackId: track.id, isPlaying: true, positionSec: pos, updatedAt: Date.now() };
+      state = clearPlaylistFields({
+        trackId: track.id,
+        isPlaying: true,
+        positionSec: pos,
+        updatedAt: Date.now()
+      });
+    } else if (action === 'next') {
+      const advanced = await advancePlaylistTrack(campaignId, state, 1);
+      if (!advanced) {
+        state = { ...clearPlaylistFields(state), isPlaying: false, positionSec: 0, updatedAt: Date.now() };
+      } else {
+        state = {
+          ...state,
+          trackId: advanced.trackId,
+          isPlaying: true,
+          positionSec: 0,
+          updatedAt: Date.now(),
+          shuffleOrder: advanced.shuffleOrder
+        };
+      }
+    } else if (action === 'playlist-options') {
+      if (!state.playlistId) return;
+      if (data.shuffle !== undefined) {
+        state.shuffle = !!data.shuffle;
+        if (state.shuffle) {
+          const { shuffleOrder } = await resolvePlaylistOrder(state.playlistId, true);
+          state.shuffleOrder = shuffleOrder;
+        } else {
+          state.shuffleOrder = [];
+        }
+      }
+      if (data.autoAdvance !== undefined) state.autoAdvance = !!data.autoAdvance;
+      state.updatedAt = Date.now();
     } else if (action === 'pause') {
       if (!state.trackId) return;
       const pos = Math.max(0, parseFloat(data.positionSec) ?? getSyncedMusicPosition(state));
@@ -1239,6 +1706,149 @@ io.on('connection', (socket) => {
       } catch (_e) { /* ignore */ }
     }
     await messageOps.create(socket.campaignId, socket.user.id, displayName, chatContent, 'roll', data.isSecret, '', JSON.stringify(rollPayload));
+  });
+
+  // ===== Group rolls (DM prosi całą drużynę o rzut, każdy gracz dostaje prompt) =====
+  socket.on('group-roll-start', async (data) => {
+    if (socket.userRole !== 'dm' || !socket.campaignId) return;
+
+    const allowedTypes = ['skill', 'ability', 'save', 'custom'];
+    if (!allowedTypes.includes(data?.type)) {
+      socket.emit('group-roll-error', { message: 'Nieprawidłowy typ rzutu' });
+      return;
+    }
+
+    let participants;
+    try {
+      const characters = await characterOps.findByCampaign(socket.campaignId);
+      const requestedIds = Array.isArray(data.participantCharIds) ? data.participantCharIds : null;
+      participants = characters
+        .filter((c) => c.user_id) // tylko postacie graczy
+        .filter((c) => !requestedIds || requestedIds.includes(c.id))
+        .map((c) => ({
+          userId: c.user_id,
+          characterId: c.id,
+          characterName: c.name,
+          status: 'pending',
+          result: null
+        }));
+    } catch (e) {
+      socket.emit('group-roll-error', { message: 'Błąd ładowania postaci' });
+      return;
+    }
+
+    if (!participants.length) {
+      socket.emit('group-roll-error', { message: 'Brak graczy do rzutu' });
+      return;
+    }
+
+    const sessionId = uuidv4();
+    const label = String(data.label || 'Rzut grupowy').slice(0, 80);
+    const dc = (typeof data.dc === 'number' && data.dc > 0) ? Math.floor(data.dc) : null;
+
+    const session = {
+      id: sessionId,
+      campaignId: socket.campaignId,
+      dmUserId: socket.user.id,
+      type: data.type,
+      payload: data.payload || {},
+      dc,
+      label,
+      advantage: !!data.advantage,
+      disadvantage: !!data.disadvantage,
+      isSecret: !!data.isSecret,
+      participants,
+      createdAt: Date.now()
+    };
+    groupRollSessions.set(sessionId, session);
+    setTimeout(() => {
+      const s = groupRollSessions.get(sessionId);
+      if (s) finalizeGroupRoll(s); // timeout = auto-finalize
+    }, GROUP_ROLL_TTL_MS);
+
+    // Wyślij prompt każdemu uczestnikowi (po jego userId)
+    const room = io.sockets.adapter.rooms.get(socket.campaignId);
+    if (room) {
+      for (const socketId of room) {
+        const s = io.sockets.sockets.get(socketId);
+        if (!s) continue;
+        const part = participants.find((p) => p.userId === s.user.id);
+        if (!part) continue;
+        s.emit('group-roll-prompt', {
+          sessionId,
+          type: session.type,
+          payload: session.payload,
+          dc: session.dc,
+          label: session.label,
+          advantage: session.advantage,
+          disadvantage: session.disadvantage,
+          isSecret: session.isSecret,
+          characterId: part.characterId,
+          characterName: part.characterName
+        });
+      }
+    }
+
+    // Powiadom wszystkich (DM dostaje progress-modal, gracze widzą kto jeszcze rzuca)
+    io.to(socket.campaignId).emit('group-roll-progress', {
+      sessionId,
+      label: session.label,
+      dc: session.dc,
+      type: session.type,
+      payload: session.payload,
+      participants: session.participants
+    });
+  });
+
+  socket.on('group-roll-submit', (data) => {
+    if (!socket.campaignId || !data?.sessionId) return;
+    const session = groupRollSessions.get(data.sessionId);
+    if (!session || session.campaignId !== socket.campaignId) return;
+
+    const part = session.participants.find((p) => p.userId === socket.user.id && p.status === 'pending');
+    if (!part) return;
+
+    if (data.skipped) {
+      part.status = 'skipped';
+      part.result = null;
+    } else {
+      const total = parseInt(data.total, 10) || 0;
+      part.status = 'rolled';
+      part.result = {
+        total,
+        roll: parseInt(data.roll, 10) || total,
+        expr: String(data.expr || ''),
+        success: typeof session.dc === 'number' ? total >= session.dc : null
+      };
+    }
+
+    io.to(socket.campaignId).emit('group-roll-progress', {
+      sessionId: session.id,
+      label: session.label,
+      dc: session.dc,
+      type: session.type,
+      payload: session.payload,
+      participants: session.participants
+    });
+
+    if (session.participants.every((p) => p.status !== 'pending')) {
+      finalizeGroupRoll(session);
+    }
+  });
+
+  socket.on('group-roll-finalize', (data) => {
+    if (socket.userRole !== 'dm' || !data?.sessionId) return;
+    const session = groupRollSessions.get(data.sessionId);
+    if (!session || session.campaignId !== socket.campaignId) return;
+    finalizeGroupRoll(session);
+  });
+
+  socket.on('group-roll-cancel', (data) => {
+    if (socket.userRole !== 'dm' || !data?.sessionId) return;
+    const session = groupRollSessions.get(data.sessionId);
+    if (!session || session.campaignId !== socket.campaignId) return;
+    groupRollSessions.delete(session.id);
+    io.to(socket.campaignId).emit('group-roll-cancelled', { sessionId: session.id });
   });
 
   // Initiative
@@ -1633,8 +2243,15 @@ io.on('connection', (socket) => {
   socket.on('map-update-settings', async (data) => {
     if (!socket.campaignId) return;
     if (socket.userRole !== 'dm') return;
-    await mapOps.updateSettings(socket.campaignId, data);
-    io.to(socket.campaignId).emit('map-update', await buildMapPayload(socket.campaignId));
+    try {
+      await mapOps.updateSettings(socket.campaignId, data);
+      io.to(socket.campaignId).emit('map-update', await buildMapPayload(socket.campaignId));
+    } catch (err) {
+      console.error('map-update-settings', err);
+      socket.emit('map-settings-error', {
+        message: 'Nie udało się zapisać ustawień mapy. Zrestartuj serwer (migracja bazy).'
+      });
+    }
   });
 
   socket.on('get-map', async () => {
@@ -1757,25 +2374,51 @@ io.on('connection', (socket) => {
     if (!socket.campaignId) return;
     try {
       const isDm = socket.userRole === 'dm';
-      const active = await combatOps.isActiveCombatToken(socket.campaignId, data.attackerTokenId);
-      if (!isDm && !active) {
-        socket.emit('combat-error', { message: 'Brak uprawnień do zadania obrażeń' });
+      const targetTokenId = data?.targetTokenId;
+      const amount = data?.amount;
+      if (!targetTokenId) {
+        socket.emit('combat-error', { message: 'Brak celu obrażeń' });
         return;
       }
+      if (!isDm) {
+        const attackerTokenId = data?.attackerTokenId;
+        if (!attackerTokenId) {
+          socket.emit('combat-error', { message: 'Brak tokena atakującego' });
+          return;
+        }
+        const active = await combatOps.isActiveCombatToken(socket.campaignId, attackerTokenId);
+        if (!active) {
+          socket.emit('combat-error', { message: 'Brak uprawnień do zadania obrażeń' });
+          return;
+        }
+      }
       const result = await combatOps.applyDamageToToken(
-        data.targetTokenId,
-        data.amount,
+        targetTokenId,
+        amount,
         socket.campaignId
       );
+      if (!result) {
+        socket.emit('combat-error', { message: 'Nie znaleziono tokena celu' });
+        return;
+      }
       const payload = await buildMapPayload(socket.campaignId);
       io.to(socket.campaignId).emit('map-update', payload);
       await broadcastCombatUpdate(socket.campaignId);
-      socket.emit('combat-damage-applied', result);
+      io.to(socket.campaignId).emit('combat-damage-applied', result);
       if (result?.prop?.ok) {
         io.to(socket.campaignId).emit('map-prop-triggered', result.prop);
       }
+      const damagedToken = await mapOps.getTokenById(targetTokenId);
+      if (damagedToken?.entity_type === 'player' && damagedToken.entity_id) {
+        io.to(socket.campaignId).emit('character-hp-update', {
+          characterId: damagedToken.entity_id,
+          currentHp: result.hpCurrent,
+          maxHp: result.hpMax
+        });
+      }
     } catch (err) {
       console.error('combat-apply-damage', err);
+      socket.emit('combat-error', { message: 'Błąd zadawania obrażeń' });
     }
   });
 
@@ -1971,6 +2614,136 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ===== Inspiration tokens (5e) =====
+  // MG przyznaje, gracz wydaje przed rzutem dla przewagi.
+  async function broadcastInspirationUpdate(charId, deltaText, kind, actorName) {
+    const updated = await characterOps.findById(charId);
+    if (!updated) return;
+    io.to(updated.campaign_id).emit('character-inspiration-update', {
+      characterId: charId,
+      inspiration: updated.inspiration || 0,
+      deltaText: deltaText || '',
+      kind: kind || 'info',
+      actorName: actorName || ''
+    });
+    // Komunikat systemowy
+    if (deltaText) {
+      io.to(updated.campaign_id).emit('system-message', {
+        content: deltaText,
+        type: 'inspiration'
+      });
+    }
+  }
+
+  socket.on('inspiration-grant', async (data) => {
+    if (!socket.campaignId) return;
+    if (socket.userRole !== 'dm') return;
+    const charId = data?.characterId;
+    if (!charId) return;
+    try {
+      const char = await characterOps.findById(charId);
+      if (!char || char.campaign_id !== socket.campaignId) return;
+      const delta = parseInt(data.amount, 10) || 1;
+      await characterOps.addInspiration(charId, delta);
+      const text = delta > 0
+        ? `⭐ MG przyznał Inspirację: ${char.name} (+${delta})`
+        : `⭐ MG odebrał Inspirację: ${char.name} (${delta})`;
+      await broadcastInspirationUpdate(charId, text, delta > 0 ? 'success' : 'warning', socket.user?.display_name);
+    } catch (err) { console.error('inspiration-grant', err); }
+  });
+
+  socket.on('inspiration-set', async (data) => {
+    if (!socket.campaignId) return;
+    if (socket.userRole !== 'dm') return;
+    const charId = data?.characterId;
+    if (!charId) return;
+    try {
+      const char = await characterOps.findById(charId);
+      if (!char || char.campaign_id !== socket.campaignId) return;
+      const next = Math.max(0, parseInt(data.value, 10) || 0);
+      await characterOps.setInspiration(charId, next);
+      await broadcastInspirationUpdate(charId, `⭐ MG ustawił Inspirację: ${char.name} = ${next}`, 'info');
+    } catch (err) { console.error('inspiration-set', err); }
+  });
+
+  socket.on('inspiration-grant-all', async (data) => {
+    if (!socket.campaignId) return;
+    if (socket.userRole !== 'dm') return;
+    const amount = Math.max(1, parseInt(data?.amount, 10) || 1);
+    try {
+      const chars = await characterOps.findByCampaign(socket.campaignId);
+      const players = chars.filter((c) => c.user_id);
+      for (const c of players) {
+        await characterOps.addInspiration(c.id, amount);
+      }
+      io.to(socket.campaignId).emit('system-message', {
+        content: `⭐ MG przyznał Inspirację wszystkim graczom (+${amount})`,
+        type: 'inspiration'
+      });
+      for (const c of players) {
+        await broadcastInspirationUpdate(c.id, '', 'success');
+      }
+    } catch (err) { console.error('inspiration-grant-all', err); }
+  });
+
+  socket.on('inspiration-spend', async (data) => {
+    if (!socket.campaignId) return;
+    const charId = data?.characterId;
+    if (!charId) return;
+    try {
+      const char = await characterOps.findById(charId);
+      if (!char || char.campaign_id !== socket.campaignId) return;
+      // gracz może wydać tylko swoją inspirację, MG dowolną
+      if (socket.userRole !== 'dm' && char.user_id !== socket.user.id) return;
+      const cur = parseInt(char.inspiration, 10) || 0;
+      if (cur <= 0) return;
+      await characterOps.setInspiration(charId, cur - 1);
+      await broadcastInspirationUpdate(charId, `⭐ ${char.name} wydał Inspirację (przewaga na rzut)`, 'info');
+    } catch (err) { console.error('inspiration-spend', err); }
+  });
+
+  // Aktualizacja stanów na tokenie (zatruty, sparaliżowany, ...)
+  socket.on('map-token-conditions-update', async (data) => {
+    if (!socket.campaignId) return;
+    const tokenId = data?.tokenId;
+    if (!tokenId) return;
+    try {
+      const token = await mapOps.getTokenById(tokenId);
+      if (!token || token.campaign_id !== socket.campaignId) return;
+      // pozwalamy: MG zawsze, gracz tylko na swoim własnym tokenie (entity_type === 'player' i entity_id przypiętym do user.id)
+      const isDm = socket.userRole === 'dm';
+      let canEdit = isDm;
+      if (!canEdit && token.entity_type === 'player' && token.entity_id) {
+        try {
+          const owned = await characterOps.findById(token.entity_id);
+          if (owned && owned.user_id === socket.user.id) canEdit = true;
+        } catch (_e) {}
+      }
+      if (!canEdit) return;
+      await mapOps.setTokenConditions(tokenId, Array.isArray(data.conditions) ? data.conditions : []);
+      io.to(socket.campaignId).emit('map-update', await buildMapPayload(socket.campaignId));
+    } catch (err) {
+      console.error('map-token-conditions-update', err);
+    }
+  });
+
+  // Aktualizacja zasobów klasowych (Rage, Ki, Bardic Inspiration, ...)
+  socket.on('character-set-resources', async (data) => {
+    if (!socket.campaignId) return;
+    const charId = data?.characterId;
+    if (!charId) return;
+    try {
+      const char = await characterOps.findById(charId);
+      if (!char) return;
+      const isOwner = char.user_id === socket.user.id;
+      if (!isOwner && socket.userRole !== 'dm') return;
+      await characterOps.setClassResources(charId, Array.isArray(data.resources) ? data.resources : []);
+      io.to(socket.campaignId).emit('character-resources-update', { characterId: charId });
+    } catch (err) {
+      console.error('character-set-resources', err);
+    }
+  });
+
   // Character HP update (real-time)
   socket.on('character-hp-update', (data) => {
     if (!socket.campaignId) return;
@@ -2012,6 +2785,67 @@ io.on('connection', (socket) => {
     } catch (err) {
       socket.emit('economy-error', { message: err.message });
     }
+  });
+
+  // ===== Soundboard =====
+  socket.on('play-sfx', async (data) => {
+    if (!socket.campaignId) return;
+    if (socket.userRole !== 'dm') return;
+    try {
+      const sound = await soundOps.findById(data?.soundId);
+      if (!sound || sound.campaign_id !== socket.campaignId) return;
+      const volume = (typeof data.volume === 'number') ? Math.min(1, Math.max(0, data.volume)) : sound.default_volume;
+      io.to(socket.campaignId).emit('sfx-play', {
+        campaignId: socket.campaignId,
+        soundId: sound.id,
+        name: sound.name,
+        icon: sound.icon,
+        url: sound.file_url,
+        volume,
+        is_loop: sound.is_loop,
+        triggered_by: socket.user.display_name || socket.user.username
+      });
+    } catch (err) {
+      socket.emit('error-message', { error: err.message });
+    }
+  });
+
+  socket.on('ambient-set', async (data) => {
+    if (!socket.campaignId) return;
+    if (socket.userRole !== 'dm') return;
+    try {
+      const sound = await soundOps.findById(data?.soundId);
+      if (!sound || sound.campaign_id !== socket.campaignId || sound.category !== 'ambient') return;
+      const state = getAmbientState(socket.campaignId);
+      const playing = data.playing !== false;
+      if (!playing) {
+        delete state[sound.id];
+      } else {
+        const volume = (typeof data.volume === 'number') ? Math.min(1, Math.max(0, data.volume)) : sound.default_volume;
+        state[sound.id] = {
+          volume,
+          url: sound.file_url,
+          name: sound.name,
+          icon: sound.icon,
+          started_at: state[sound.id]?.started_at || Date.now()
+        };
+      }
+      io.to(socket.campaignId).emit('ambient-update', { campaignId: socket.campaignId, layers: state });
+    } catch (err) {
+      socket.emit('error-message', { error: err.message });
+    }
+  });
+
+  socket.on('ambient-stop-all', () => {
+    if (!socket.campaignId) return;
+    if (socket.userRole !== 'dm') return;
+    ambientState.set(socket.campaignId, {});
+    io.to(socket.campaignId).emit('ambient-update', { campaignId: socket.campaignId, layers: {} });
+  });
+
+  socket.on('ambient-request-state', () => {
+    if (!socket.campaignId) return;
+    socket.emit('ambient-update', { campaignId: socket.campaignId, layers: getAmbientState(socket.campaignId) });
   });
 
   // Disconnect
@@ -2107,6 +2941,748 @@ app.delete('/api/custom-items/:id', authMiddleware, async (req, res) => {
   if (!(await campaignOps.isDm(it.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
   await customItemOps.delete(req.params.id);
   res.json({ ok: true });
+});
+
+// ===== Bestiariusz: własne potwory =====
+app.get('/api/campaigns/:id/bestiary', authMiddleware, async (req, res) => {
+  if (!(await requireCampaignMember(req.params.id, req.user.id))) return res.status(403).json({ error: 'Brak dostępu' });
+  res.json(await customMonsterOps.listByCampaign(req.params.id));
+});
+
+app.post('/api/campaigns/:id/bestiary', authMiddleware, async (req, res) => {
+  if (!(await campaignOps.isDm(req.params.id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  if (!req.body?.name || !String(req.body.name).trim()) return res.status(400).json({ error: 'Wymagana nazwa' });
+  res.json(await customMonsterOps.create(req.params.id, req.body));
+});
+
+app.get('/api/bestiary/:id', authMiddleware, async (req, res) => {
+  const m = await customMonsterOps.findById(req.params.id);
+  if (!m) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await requireCampaignMember(m.campaign_id, req.user.id))) return res.status(403).json({ error: 'Brak dostępu' });
+  res.json(m);
+});
+
+app.put('/api/bestiary/:id', authMiddleware, async (req, res) => {
+  const m = await customMonsterOps.findById(req.params.id);
+  if (!m) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await campaignOps.isDm(m.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  res.json(await customMonsterOps.update(req.params.id, req.body));
+});
+
+app.delete('/api/bestiary/:id', authMiddleware, async (req, res) => {
+  const m = await customMonsterOps.findById(req.params.id);
+  if (!m) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await campaignOps.isDm(m.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  await customMonsterOps.delete(req.params.id);
+  res.json({ ok: true });
+});
+
+// Spawn potwora z bestiariusza jako NPC w kampanii.
+app.post('/api/bestiary/:id/spawn', authMiddleware, async (req, res) => {
+  const m = await customMonsterOps.findById(req.params.id);
+  if (!m) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await campaignOps.isDm(m.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  try {
+    const lines = [];
+    lines.push(`${m.size} ${m.monster_type}, ${m.alignment} · CR ${m.cr}`);
+    lines.push(`AC ${m.ac} · HP ${m.hp_max}${m.hp_formula ? ` (${m.hp_formula})` : ''} · ${m.speed}`);
+    const stats = m.stats || {};
+    lines.push(`STR ${stats.str || 10}  DEX ${stats.dex || 10}  CON ${stats.con || 10}  INT ${stats.int || 10}  WIS ${stats.wis || 10}  CHA ${stats.cha || 10}`);
+    if (m.saving_throws?.length) lines.push(`Rzuty obronne: ${m.saving_throws.join(', ')}`);
+    if (m.skills?.length) lines.push(`Umiejętności: ${m.skills.join(', ')}`);
+    if (m.damage_resistances) lines.push(`Odporności: ${m.damage_resistances}`);
+    if (m.damage_immunities) lines.push(`Niewrażliwości: ${m.damage_immunities}`);
+    if (m.condition_immunities) lines.push(`Niewrażliwości na stany: ${m.condition_immunities}`);
+    if (m.senses) lines.push(`Zmysły: ${m.senses}`);
+    if (m.languages) lines.push(`Języki: ${m.languages}`);
+    if (m.attacks?.length) {
+      lines.push('\nAtaki:');
+      m.attacks.forEach((a) => {
+        const bits = [`• ${a.name || 'Atak'}`];
+        if (a.toHit) bits.push(`+${String(a.toHit).replace(/^\+/, '')} do trafienia`);
+        if (a.range) bits.push(`zasięg ${a.range}`);
+        if (a.damage) bits.push(`${a.damage}${a.damageType ? ` ${a.damageType}` : ''}`);
+        if (a.special) bits.push(a.special);
+        lines.push(bits.join(' · '));
+      });
+    }
+    if (m.traits?.length) {
+      lines.push('\nCechy:');
+      m.traits.forEach((t) => lines.push(`• ${t.name}: ${t.desc || ''}`));
+    }
+    if (m.actions?.length) {
+      lines.push('\nAkcje:');
+      m.actions.forEach((t) => lines.push(`• ${t.name}: ${t.desc || ''}`));
+    }
+    if (m.legendary_actions?.length) {
+      lines.push('\nAkcje legendarne (3/turę):');
+      m.legendary_actions.forEach((t) => lines.push(`• ${t.name}${t.cost ? ` (${t.cost})` : ''}: ${t.desc || ''}`));
+    }
+    if (m.reactions?.length) {
+      lines.push('\nReakcje:');
+      m.reactions.forEach((t) => lines.push(`• ${t.name}: ${t.desc || ''}`));
+    }
+    if (m.notes) lines.push(`\n${m.notes}`);
+
+    const npc = await npcOps.create(m.campaign_id, req.user.id, {
+      name: m.name,
+      race: m.size + ' ' + m.monster_type,
+      description: m.notes ? m.notes.slice(0, 200) : '',
+      max_hp: m.hp_max,
+      current_hp: m.hp_max,
+      armor_class: m.ac,
+      notes: lines.join('\n'),
+      stats: JSON.stringify({
+        category: 'monster',
+        cr: m.cr,
+        size: m.size,
+        stats: stats,
+        sourceBestiaryId: m.id,
+        attacks: m.attacks || []
+      }),
+      is_visible: !!req.body?.is_visible
+    });
+    res.json(npc);
+  } catch (err) {
+    console.error('bestiary-spawn', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== Quest tracker =====
+function _stripQuestForPlayers(q) {
+  if (!q) return q;
+  // Hide DM-only fields from non-DM responses.
+  const { dm_notes: _omit, ...rest } = q;
+  return rest;
+}
+async function _broadcastQuestList(campaignId) {
+  const list = await questOps.listByCampaign(campaignId);
+  io.to(campaignId).emit('quests-update', { campaignId, quests: list });
+}
+
+app.get('/api/campaigns/:id/quests', authMiddleware, async (req, res) => {
+  if (!(await requireCampaignMember(req.params.id, req.user.id))) return res.status(403).json({ error: 'Brak dostępu' });
+  const isDm = await campaignOps.isDm(req.params.id, req.user.id);
+  let list = await questOps.listByCampaign(req.params.id);
+  if (!isDm) list = list.filter((q) => q.visible_to_players).map(_stripQuestForPlayers);
+  res.json(list);
+});
+
+app.post('/api/campaigns/:id/quests', authMiddleware, async (req, res) => {
+  if (!(await campaignOps.isDm(req.params.id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  if (!req.body?.title || !String(req.body.title).trim()) return res.status(400).json({ error: 'Wymagana nazwa' });
+  const q = await questOps.create(req.params.id, req.body);
+  await _broadcastQuestList(req.params.id);
+  res.json(q);
+});
+
+app.get('/api/quests/:id', authMiddleware, async (req, res) => {
+  const q = await questOps.findById(req.params.id);
+  if (!q) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await requireCampaignMember(q.campaign_id, req.user.id))) return res.status(403).json({ error: 'Brak dostępu' });
+  const isDm = await campaignOps.isDm(q.campaign_id, req.user.id);
+  if (!isDm) {
+    if (!q.visible_to_players) return res.status(403).json({ error: 'Quest ukryty przez MG' });
+    return res.json(_stripQuestForPlayers(q));
+  }
+  res.json(q);
+});
+
+app.put('/api/quests/:id', authMiddleware, async (req, res) => {
+  const q = await questOps.findById(req.params.id);
+  if (!q) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await campaignOps.isDm(q.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  const updated = await questOps.update(req.params.id, req.body);
+  await _broadcastQuestList(q.campaign_id);
+  res.json(updated);
+});
+
+app.delete('/api/quests/:id', authMiddleware, async (req, res) => {
+  const q = await questOps.findById(req.params.id);
+  if (!q) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await campaignOps.isDm(q.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  await questOps.delete(req.params.id);
+  await _broadcastQuestList(q.campaign_id);
+  res.json({ ok: true });
+});
+
+app.post('/api/quests/:id/objective/:idx', authMiddleware, async (req, res) => {
+  const q = await questOps.findById(req.params.id);
+  if (!q) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await campaignOps.isDm(q.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  const updated = await questOps.toggleObjective(req.params.id, parseInt(req.params.idx, 10));
+  await _broadcastQuestList(q.campaign_id);
+  res.json(updated);
+});
+
+// Mark complete + optionally award XP/gold to all party characters.
+app.post('/api/quests/:id/complete', authMiddleware, async (req, res) => {
+  const q = await questOps.findById(req.params.id);
+  if (!q) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await campaignOps.isDm(q.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  const updated = await questOps.setStatus(req.params.id, 'completed');
+
+  const awardXp = !!req.body?.awardXp && updated.xp_reward > 0;
+  const awardGold = !!req.body?.awardGold && updated.gold_reward > 0;
+  const awarded = { xp: 0, gold: 0, characters: [] };
+
+  if (awardXp || awardGold) {
+    const party = await characterOps.findByCampaign(q.campaign_id);
+    const splitGold = awardGold && party.length > 0 ? Math.floor(updated.gold_reward / party.length) : 0;
+    for (const ch of party) {
+      const updates = {};
+      if (awardXp) updates.experience_points = (parseInt(ch.experience_points, 10) || 0) + updated.xp_reward;
+      if (splitGold > 0) updates.gold = (parseInt(ch.gold, 10) || 0) + splitGold;
+      if (Object.keys(updates).length) {
+        try {
+          await characterOps.dmUpdate(ch.id, q.campaign_id, updates);
+          awarded.characters.push({ id: ch.id, name: ch.name });
+        } catch (e) { console.error('quest-award', e); }
+      }
+    }
+    if (awardXp) awarded.xp = updated.xp_reward;
+    if (splitGold > 0) awarded.gold = splitGold;
+
+    io.to(q.campaign_id).emit('characters-bulk-update', { campaignId: q.campaign_id });
+  }
+
+  io.to(q.campaign_id).emit('quest-completed', {
+    campaignId: q.campaign_id,
+    quest: updated,
+    awarded
+  });
+  await _broadcastQuestList(q.campaign_id);
+  res.json({ quest: updated, awarded });
+});
+
+app.post('/api/quests/:id/status', authMiddleware, async (req, res) => {
+  const q = await questOps.findById(req.params.id);
+  if (!q) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await campaignOps.isDm(q.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  const updated = await questOps.setStatus(req.params.id, req.body?.status);
+  await _broadcastQuestList(q.campaign_id);
+  res.json(updated);
+});
+
+// ===== Player handouts =====
+function _canSeeHandout(handout, userId) {
+  if (!handout || !handout.is_revealed) return false;
+  if (!handout.recipient_user_ids || handout.recipient_user_ids.length === 0) return true;
+  return handout.recipient_user_ids.includes(String(userId));
+}
+
+app.get('/api/campaigns/:id/handouts', authMiddleware, async (req, res) => {
+  if (!(await requireCampaignMember(req.params.id, req.user.id))) return res.status(403).json({ error: 'Brak dostępu' });
+  const isDm = await campaignOps.isDm(req.params.id, req.user.id);
+  if (isDm) return res.json(await handoutOps.listByCampaign(req.params.id));
+  res.json(await handoutOps.listForUser(req.params.id, req.user.id));
+});
+
+app.post('/api/campaigns/:id/handouts', authMiddleware, async (req, res) => {
+  if (!(await campaignOps.isDm(req.params.id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  handoutUpload.single('file')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || 'Błąd uploadu' });
+    if (!req.file) return res.status(400).json({ error: 'Brak pliku' });
+    try {
+      const fileUrl = `/handout-files/${req.file.filename}`;
+      let recipients = [];
+      if (req.body?.recipient_user_ids) {
+        try {
+          const parsed = JSON.parse(req.body.recipient_user_ids);
+          if (Array.isArray(parsed)) recipients = parsed.map(String);
+        } catch { recipients = []; }
+      }
+      const isRevealed = req.body?.is_revealed !== 'false' && req.body?.is_revealed !== false;
+      const handout = await handoutOps.create(req.params.id, req.user.id, {
+        title: req.body?.title || req.file.originalname || 'Handout',
+        description: req.body?.description || '',
+        file_url: fileUrl,
+        mime_type: req.file.mimetype,
+        file_size: req.file.size,
+        recipient_user_ids: recipients,
+        is_revealed: isRevealed
+      });
+      // Notify only intended recipients (or whole campaign if all-party).
+      // DM is always notified. Players outside recipient list don't see the event.
+      const campaignId = req.params.id;
+      const payload = {
+        campaignId,
+        handoutId: handout.id,
+        title: handout.title,
+        recipient_user_ids: handout.recipient_user_ids,
+        is_revealed: handout.is_revealed,
+        from: req.user.display_name || req.user.username || 'MG'
+      };
+      const allowedIds = new Set((handout.recipient_user_ids || []).map(String));
+      const allParty = allowedIds.size === 0;
+      for (const [_sid, s] of io.of('/').sockets) {
+        if (s.campaignId !== campaignId) continue;
+        if (s.userRole === 'dm' || allParty || allowedIds.has(String(s.user.id))) {
+          s.emit('handout-new', payload);
+        }
+      }
+      res.json(handout);
+    } catch (e) {
+      tryDeleteHandoutFile(`/handout-files/${req.file.filename}`);
+      res.status(500).json({ error: e.message });
+    }
+  });
+});
+
+// Auth helper that accepts ?token= query param (so <img>/<iframe> can embed).
+function handoutAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+  let token = null;
+  if (authHeader?.startsWith('Bearer ')) token = authHeader.substring(7);
+  else if (req.query?.token) token = String(req.query.token);
+  if (!token) return res.status(401).json({ error: 'Brak tokenu' });
+  const decoded = verifyToken(token);
+  if (!decoded) return res.status(401).json({ error: 'Nieprawidłowy token' });
+  req.user = decoded;
+  next();
+}
+
+// Protected handout file delivery: looks up handout by filename, checks ACL.
+app.get('/handout-files/:filename', handoutAuth, async (req, res) => {
+  const filename = path.basename(req.params.filename);
+  const fileUrl = `/handout-files/${filename}`;
+  const handout = await handoutOps.findByFileUrl(fileUrl);
+  if (!handout) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await requireCampaignMember(handout.campaign_id, req.user.id))) {
+    return res.status(403).json({ error: 'Brak dostępu' });
+  }
+  const isDm = await campaignOps.isDm(handout.campaign_id, req.user.id);
+  if (!isDm && !_canSeeHandout(handout, req.user.id)) {
+    return res.status(403).json({ error: 'Brak dostępu do tego handoutu' });
+  }
+  const filePath = path.normalize(path.join(handoutUploadsDir, filename));
+  if (!filePath.startsWith(handoutUploadsDir)) return res.status(400).json({ error: 'Niedozwolona ścieżka' });
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Plik nie istnieje' });
+  res.setHeader('Content-Type', handout.mime_type || 'application/octet-stream');
+  res.sendFile(filePath);
+});
+
+app.get('/api/handouts/:id', authMiddleware, async (req, res) => {
+  const h = await handoutOps.findById(req.params.id);
+  if (!h) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await requireCampaignMember(h.campaign_id, req.user.id))) return res.status(403).json({ error: 'Brak dostępu' });
+  const isDm = await campaignOps.isDm(h.campaign_id, req.user.id);
+  if (!isDm && !_canSeeHandout(h, req.user.id)) return res.status(403).json({ error: 'Brak dostępu do tego handoutu' });
+  res.json(h);
+});
+
+app.put('/api/handouts/:id', authMiddleware, async (req, res) => {
+  const h = await handoutOps.findById(req.params.id);
+  if (!h) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await campaignOps.isDm(h.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  const updated = await handoutOps.update(req.params.id, req.body || {});
+  io.to(h.campaign_id).emit('handout-updated', {
+    campaignId: h.campaign_id,
+    handoutId: updated.id,
+    title: updated.title,
+    recipient_user_ids: updated.recipient_user_ids,
+    is_revealed: updated.is_revealed
+  });
+  res.json(updated);
+});
+
+app.delete('/api/handouts/:id', authMiddleware, async (req, res) => {
+  const h = await handoutOps.findById(req.params.id);
+  if (!h) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await campaignOps.isDm(h.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  await handoutOps.delete(req.params.id);
+  tryDeleteHandoutFile(h.file_url);
+  io.to(h.campaign_id).emit('handout-deleted', { campaignId: h.campaign_id, handoutId: req.params.id });
+  res.json({ ok: true });
+});
+
+// ===== World state: kalendarz, pora dnia, pogoda =====
+app.get('/api/campaigns/:id/world-state', authMiddleware, async (req, res) => {
+  if (!(await requireCampaignMember(req.params.id, req.user.id))) return res.status(403).json({ error: 'Brak dostępu' });
+  res.json(await worldStateOps.get(req.params.id));
+});
+
+app.put('/api/campaigns/:id/world-state', authMiddleware, async (req, res) => {
+  if (!(await campaignOps.isDm(req.params.id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  const updated = await worldStateOps.update(req.params.id, req.body || {});
+  io.to(req.params.id).emit('world-state-update', { campaignId: req.params.id, state: updated });
+  res.json(updated);
+});
+
+// ===== Soundboard / Ambient mixer =====
+app.get('/api/campaigns/:id/sounds', authMiddleware, async (req, res) => {
+  if (!(await requireCampaignMember(req.params.id, req.user.id))) return res.status(403).json({ error: 'Brak dostępu' });
+  const category = req.query.category && ['sfx', 'ambient'].includes(req.query.category) ? req.query.category : null;
+  res.json(await soundOps.listByCampaign(req.params.id, category));
+});
+
+app.post('/api/campaigns/:id/sounds', authMiddleware, async (req, res) => {
+  if (!(await campaignOps.isDm(req.params.id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  soundUpload.single('audio')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || 'Błąd uploadu' });
+    if (!req.file) return res.status(400).json({ error: 'Brak pliku' });
+    try {
+      const fileUrl = `/uploads/sounds/${req.file.filename}`;
+      let tags = [];
+      if (req.body?.tags) {
+        try { const p = JSON.parse(req.body.tags); if (Array.isArray(p)) tags = p; } catch { tags = []; }
+      }
+      const sound = await soundOps.create(req.params.id, req.user.id, {
+        name: req.body?.name || req.file.originalname?.replace(/\.[^.]+$/, '') || 'Dźwięk',
+        category: req.body?.category || 'sfx',
+        file_url: fileUrl,
+        mime_type: req.file.mimetype,
+        file_size: req.file.size,
+        icon: req.body?.icon || '',
+        tags,
+        default_volume: req.body?.default_volume,
+        is_loop: req.body?.is_loop === 'true' || req.body?.category === 'ambient'
+      });
+      io.to(req.params.id).emit('sound-library-update', { campaignId: req.params.id });
+      res.json(sound);
+    } catch (e) {
+      tryDeleteSoundFile(`/uploads/sounds/${req.file.filename}`);
+      res.status(500).json({ error: e.message });
+    }
+  });
+});
+
+app.post('/api/campaigns/:id/sounds/youtube', authMiddleware, musicYoutubeLimiter, async (req, res) => {
+  if (!(await campaignOps.isDm(req.params.id, req.user.id))) {
+    return res.status(403).json({ error: 'Tylko Mistrz Gry może dodawać dźwięki' });
+  }
+
+  const rawUrl = (req.body?.url || '').trim();
+  const customName = (req.body?.name || '').trim().slice(0, 100);
+  const category = ['sfx', 'ambient'].includes(req.body?.category) ? req.body.category : 'sfx';
+  const icon = String(req.body?.icon || '').slice(0, 16);
+  const vol = parseFloat(req.body?.default_volume);
+  const defaultVolume = Math.min(1, Math.max(0, isNaN(vol) ? 0.7 : vol));
+  const videoId = youtubeImport.parseYoutubeId(rawUrl);
+
+  if (!videoId) {
+    return res.status(400).json({ error: 'Nieprawidłowy link YouTube' });
+  }
+
+  const sourceUrl = youtubeImport.buildYoutubeUrl(videoId);
+
+  try {
+    const existing = await soundOps.findByYoutubeId(req.params.id, videoId);
+    if (existing) {
+      return res.json({ ...existing, duplicate: true });
+    }
+
+    await youtubeImport.assertYtdlpAvailable();
+
+    let metaName = customName;
+    if (!metaName) {
+      try {
+        const meta = await youtubeImport.fetchMetadata(sourceUrl);
+        metaName = meta.title;
+        if (meta.duration > youtubeImport.MAX_DURATION_SEC) {
+          return res.status(400).json({
+            error: `Film jest za długi (max ${Math.floor(youtubeImport.MAX_DURATION_SEC / 60)} min)`
+          });
+        }
+      } catch (metaErr) {
+        console.warn('YouTube metadata fetch failed (sound):', metaErr.message);
+        metaName = `YouTube ${videoId}`;
+      }
+    }
+
+    const filename = `sound-${req.params.id}-yt-${videoId}-${Date.now()}.mp3`;
+    const destPath = path.join(soundUploadsDir, filename);
+    const fileUrl = `/uploads/sounds/${filename}`;
+
+    let downloaded;
+    try {
+      downloaded = await youtubeImport.downloadAudioToFile({ videoId, destPath });
+    } catch (dlErr) {
+      tryDeleteSoundFile(fileUrl);
+      throw dlErr;
+    }
+
+    const sound = await soundOps.create(req.params.id, req.user.id, {
+      name: metaName || `YouTube ${videoId}`,
+      category,
+      file_url: fileUrl,
+      file_size: downloaded.fileSize,
+      mime_type: downloaded.mimeType,
+      icon,
+      default_volume: defaultVolume,
+      is_loop: category === 'ambient',
+      source_type: 'youtube',
+      youtube_id: videoId,
+      source_url: sourceUrl
+    });
+
+    io.to(req.params.id).emit('sound-library-update', { campaignId: req.params.id });
+    res.json(sound);
+  } catch (err) {
+    console.error('YouTube sound import error:', err);
+    const msg = String(err?.message || err);
+    if (/source_type|youtube_id|source_url/i.test(msg) && /column|does not exist/i.test(msg)) {
+      return res.status(503).json({
+        error: 'Brak migracji bazy dla YouTube w dźwiękach — zrestartuj serwer (npm start)'
+      });
+    }
+    const code = err.code || '';
+    if (code === 'YTDLP_DISABLED' || code === 'YTDLP_MISSING') {
+      return res.status(503).json({
+        error: err.message || 'Import YouTube niedostępny — zainstaluj yt-dlp i ffmpeg'
+      });
+    }
+    if (code === 'YTDLP_TIMEOUT') {
+      return res.status(504).json({ error: err.message || 'Przekroczono czas pobierania' });
+    }
+    if (code === 'YTDLP_FAILED') {
+      return res.status(502).json({
+        error: err.message || 'Nie udało się pobrać audio z YouTube'
+      });
+    }
+    res.status(500).json({ error: err.message || 'Błąd importu YouTube' });
+  }
+});
+
+app.put('/api/sounds/:id', authMiddleware, async (req, res) => {
+  const s = await soundOps.findById(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await campaignOps.isDm(s.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  const updated = await soundOps.update(req.params.id, req.body || {});
+  io.to(s.campaign_id).emit('sound-library-update', { campaignId: s.campaign_id });
+  res.json(updated);
+});
+
+app.delete('/api/sounds/:id', authMiddleware, async (req, res) => {
+  const s = await soundOps.findById(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Nie znaleziono' });
+  if (!(await campaignOps.isDm(s.campaign_id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  await soundOps.delete(req.params.id);
+  tryDeleteSoundFile(s.file_url);
+  // If the removed sound was active in ambient mixer, stop it.
+  const state = getAmbientState(s.campaign_id);
+  if (state[s.id]) {
+    delete state[s.id];
+    io.to(s.campaign_id).emit('ambient-update', { campaignId: s.campaign_id, layers: state });
+  }
+  io.to(s.campaign_id).emit('sound-library-update', { campaignId: s.campaign_id });
+  res.json({ ok: true });
+});
+
+// Returns current ambient mixer state for a campaign.
+app.get('/api/campaigns/:id/ambient', authMiddleware, async (req, res) => {
+  if (!(await requireCampaignMember(req.params.id, req.user.id))) return res.status(403).json({ error: 'Brak dostępu' });
+  res.json({ layers: getAmbientState(req.params.id) });
+});
+
+// ===== Export / Backup =====
+function _downloadAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+  let token = null;
+  if (authHeader?.startsWith('Bearer ')) token = authHeader.substring(7);
+  else if (req.query?.token) token = String(req.query.token);
+  if (!token) return res.status(401).json({ error: 'Brak tokenu' });
+  const decoded = verifyToken(token);
+  if (!decoded) return res.status(401).json({ error: 'Nieprawidłowy token' });
+  req.user = decoded;
+  next();
+}
+
+// Resolve a URL stored in DB to a local filesystem path inside known upload directories.
+function _resolveUploadPath(url) {
+  if (typeof url !== 'string' || !url.startsWith('/')) return null;
+  if (url.startsWith('/uploads/')) {
+    const candidate = path.normalize(path.join(__dirname, 'public', url));
+    const publicUploads = path.join(__dirname, 'public', 'uploads');
+    if (candidate.startsWith(publicUploads) && fs.existsSync(candidate)) return candidate;
+    return null;
+  }
+  if (url.startsWith('/handout-files/')) {
+    const filename = path.basename(url);
+    const candidate = path.normalize(path.join(handoutUploadsDir, filename));
+    if (candidate.startsWith(handoutUploadsDir) && fs.existsSync(candidate)) return candidate;
+    return null;
+  }
+  return null;
+}
+
+// JSON-only snapshot.
+app.get('/api/campaigns/:id/export.json', _downloadAuth, async (req, res) => {
+  if (!(await campaignOps.isDm(req.params.id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  try {
+    const snapshot = await collectCampaignSnapshot(req.params.id);
+    const safeName = String(snapshot.campaign?.name || 'campaign').replace(/[^a-z0-9_\-]+/gi, '_').slice(0, 40) || 'campaign';
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="roll1-${safeName}-${Date.now()}.json"`);
+    res.json(snapshot);
+  } catch (err) {
+    console.error('export-json', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Full ZIP backup (JSON + uploads).
+app.get('/api/campaigns/:id/export.zip', _downloadAuth, async (req, res) => {
+  if (!(await campaignOps.isDm(req.params.id, req.user.id))) return res.status(403).json({ error: 'Tylko MG' });
+  try {
+    const snapshot = await collectCampaignSnapshot(req.params.id);
+    const safeName = String(snapshot.campaign?.name || 'campaign').replace(/[^a-z0-9_\-]+/gi, '_').slice(0, 40) || 'campaign';
+    const filename = `roll1-${safeName}-${Date.now()}.zip`;
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.on('warning', (e) => console.warn('archive warn:', e?.message));
+    archive.on('error', (e) => {
+      console.error('archive error:', e);
+      try { res.end(); } catch (_) { /* noop */ }
+    });
+    archive.pipe(res);
+
+    // Snapshot JSON.
+    archive.append(JSON.stringify(snapshot, null, 2), { name: 'campaign.json' });
+
+    // Uploads — preserve original URL path inside the ZIP for clarity.
+    const filesIncluded = [];
+    const filesMissing = [];
+    for (const url of snapshot.referenced_files) {
+      const fsPath = _resolveUploadPath(url);
+      if (!fsPath) { filesMissing.push(url); continue; }
+      // Strip leading '/' so files end up under 'uploads/maps/...' or 'handout-files/...'
+      const archivePath = url.replace(/^\//, '');
+      try {
+        archive.file(fsPath, { name: archivePath });
+        filesIncluded.push(url);
+      } catch (e) {
+        console.warn('zip skip', url, e?.message);
+        filesMissing.push(url);
+      }
+    }
+
+    // README + manifest for restoration context.
+    const readme =
+`Roll 1 — backup kampanii
+========================
+Eksport wykonany: ${snapshot.meta.exported_at}
+Kampania: ${snapshot.campaign?.name || 'N/A'} (id: ${snapshot.meta.campaign_id})
+Schema version: ${snapshot.meta.schema_version}
+
+Zawartość:
+- campaign.json — pełny snapshot tabel SQL (postacie, NPC, mapa, czat, questy, handouty, world state, etc.)
+- uploads/maps/      — tła map
+- uploads/tokens/    — biblioteka obrazków tokenów
+- uploads/characters/— awatary postaci
+- uploads/music/     — muzyka kampanii
+- handout-files/     — handouty (obrazy/PDF)
+
+Pliki uwzględnione: ${filesIncluded.length}
+Pliki brakujące:    ${filesMissing.length}${filesMissing.length ? '\n  ' + filesMissing.join('\n  ') : ''}
+
+Import w aplikacji: Panel MG → Eksport / Backup → Import (JSON lub ZIP).
+Przywraca dane do wybranej kampanii (zastępuje obecną zawartość).
+`;
+    archive.append(readme, { name: 'README.txt' });
+    archive.append(JSON.stringify({
+      exported_at: snapshot.meta.exported_at,
+      files_included: filesIncluded,
+      files_missing: filesMissing
+    }, null, 2), { name: 'manifest.json' });
+
+    await archive.finalize();
+  } catch (err) {
+    console.error('export-zip', err);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+    else { try { res.end(); } catch (_) { /* noop */ } }
+  }
+});
+
+const importTempDir = path.join(__dirname, 'private_uploads', 'import-temp');
+fs.mkdirSync(importTempDir, { recursive: true });
+
+const backupImportUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, importTempDir),
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname || '').toLowerCase();
+      cb(null, `${uuidv4()}${ext || '.bin'}`);
+    }
+  }),
+  limits: { fileSize: 300 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ok = /\.(json|zip)$/i.test(file.originalname || '');
+    cb(ok ? null : new Error('Dozwolone formaty: .json, .zip'), ok);
+  }
+});
+
+// Przywrócenie backupu do bieżącej kampanii (zastępuje dane kampanii).
+app.post('/api/campaigns/:id/import', authMiddleware, backupImportUpload.single('backup'), async (req, res) => {
+  if (!(await campaignOps.isDm(req.params.id, req.user.id))) {
+    return res.status(403).json({ error: 'Tylko MG może importować backup' });
+  }
+  let extractDir = null;
+  const uploadPath = req.file?.path;
+  try {
+    let snapshot;
+    let filesRoot = null;
+
+    if (uploadPath) {
+      const ext = path.extname(req.file.originalname || '').toLowerCase();
+      if (ext === '.json') {
+        snapshot = JSON.parse(fs.readFileSync(uploadPath, 'utf8'));
+      } else if (ext === '.zip') {
+        extractDir = fs.mkdtempSync(path.join(importTempDir, 'zip-'));
+        const zip = new AdmZip(uploadPath);
+        zip.extractAllTo(extractDir, true);
+        const jsonPath = path.join(extractDir, 'campaign.json');
+        if (!fs.existsSync(jsonPath)) {
+          throw new Error('W archiwum ZIP brak pliku campaign.json');
+        }
+        snapshot = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+        filesRoot = extractDir;
+      } else {
+        throw new Error('Nieobsługiwany format pliku');
+      }
+    } else {
+      return res.status(400).json({ error: 'Wyślij plik .json lub .zip (pole „backup”)' });
+    }
+
+    const members = await campaignOps.getMembers(req.params.id);
+    const memberUserIds = new Set(members.map((m) => m.user_id));
+
+    const result = await restoreCampaignFromSnapshot(req.params.id, snapshot, {
+      dmUserId: req.user.id,
+      memberUserIds,
+      filesRoot,
+      projectRoot: __dirname
+    });
+
+    musicPlaybackByCampaign.delete(req.params.id);
+    ambientState.set(req.params.id, {});
+    io.to(req.params.id).emit('music-sync', await buildMusicPayload(req.params.id));
+    io.to(req.params.id).emit('ambient-update', { campaignId: req.params.id, layers: {} });
+    io.to(req.params.id).emit('campaign-restored', { campaignId: req.params.id });
+    io.to(req.params.id).emit('world-state-update', {
+      campaignId: req.params.id,
+      state: await worldStateOps.get(req.params.id)
+    });
+
+    res.json({
+      ok: true,
+      message: 'Backup zaimportowany',
+      ...result
+    });
+  } catch (err) {
+    console.error('campaign-import', err);
+    res.status(400).json({ error: err.message || 'Import nieudany' });
+  } finally {
+    if (uploadPath) {
+      try { fs.unlinkSync(uploadPath); } catch (_) { /* noop */ }
+    }
+    if (extractDir) {
+      try { fs.rmSync(extractDir, { recursive: true, force: true }); } catch (_) { /* noop */ }
+    }
+  }
 });
 
 // ===== Token image library (per campaign) =====
@@ -2314,6 +3890,11 @@ async function startServer() {
     }
   }
   await initializeDatabase();
+  if (youtubeImport.YTDLP_ENABLED) {
+    youtubeImport.assertYtdlpAvailable()
+      .then(() => console.log(`YouTube import: yt-dlp OK (${youtubeImport.getYtdlpPath()})`))
+      .catch((err) => console.warn(`YouTube import: ${err.message}`));
+  }
   server.listen(PORT, () => {
     console.log(`\n⚔️  Dedeki D&D VTT działa na http://localhost:${PORT}\n`);
   });

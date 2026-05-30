@@ -24,6 +24,15 @@ const App = {
     Economy.init();
     DMEconomy.init();
     if (typeof TokenLibrary !== 'undefined') TokenLibrary.init();
+    if (typeof GroupRolls !== 'undefined') GroupRolls.init();
+    if (typeof Spellbook !== 'undefined') Spellbook.init();
+    if (typeof Inspiration !== 'undefined') Inspiration.init();
+    if (typeof Bestiary !== 'undefined') Bestiary.init();
+    if (typeof NpcGenerator !== 'undefined') NpcGenerator.init();
+    if (typeof WorldState !== 'undefined') WorldState.init();
+    if (typeof ExportBackup !== 'undefined') ExportBackup.init();
+    if (typeof Soundboard !== 'undefined') Soundboard.init();
+    if (typeof RandomTables !== 'undefined') RandomTables.init();
 
     document.querySelectorAll('.modal-close').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -51,8 +60,44 @@ const App = {
         tab.classList.add('active');
         document.getElementById(tab.dataset.panel).classList.add('active');
 
+        if (tab.dataset.panel === 'characters-panel' && App.currentCampaign?.role === 'dm' && typeof DMPanel !== 'undefined') {
+          DMPanel.loadPartyOverview();
+        }
         if (tab.dataset.panel === 'map-panel') {
           BattleMap.loadMap();
+        }
+        if (tab.dataset.panel === 'world-calendar-panel' && typeof WorldState !== 'undefined') {
+          WorldState.onPanelActivate();
+        }
+        if (tab.dataset.panel === 'quests-panel' && typeof Quests !== 'undefined') {
+          Quests.onPanelActivate();
+        }
+        if (tab.dataset.panel === 'handouts-panel' && typeof Handouts !== 'undefined') {
+          Handouts.onPanelActivate();
+        }
+        if (tab.dataset.panel === 'spellbook-panel' && typeof Spellbook !== 'undefined') {
+          Spellbook.onPanelActivate();
+        }
+        if (tab.dataset.panel === 'soundboard-panel' && typeof Soundboard !== 'undefined') {
+          Soundboard.onPanelActivate();
+        }
+        if (tab.dataset.panel === 'campaign-music-panel' && typeof CampaignMusic !== 'undefined') {
+          CampaignMusic.onPanelActivate();
+        }
+        if (tab.dataset.panel === 'bestiary-panel' && typeof Bestiary !== 'undefined') {
+          Bestiary.onPanelActivate();
+        }
+        if (tab.dataset.panel === 'npc-generator-panel' && typeof NpcGenerator !== 'undefined') {
+          NpcGenerator.onPanelActivate();
+        }
+        if (tab.dataset.panel === 'random-tables-panel' && typeof RandomTables !== 'undefined') {
+          RandomTables.onPanelActivate();
+        }
+        if (tab.dataset.panel === 'dm-economy-panel' && typeof DMEconomy !== 'undefined') {
+          DMEconomy.onPanelActivate();
+        }
+        if (tab.dataset.panel === 'dm-panel' && typeof DMPanel !== 'undefined') {
+          DMPanel.onPanelActivate();
         }
       });
     });
@@ -67,9 +112,35 @@ const App = {
     }
   },
 
-  onLogin(user) {
+  _lastCampaignStorageKey() {
+    const uid = this.user?.id ?? getUser()?.id;
+    return uid ? `dedeki-last-campaign-${uid}` : null;
+  },
+
+  _saveLastCampaign(campaignId) {
+    const key = this._lastCampaignStorageKey();
+    if (key && campaignId) localStorage.setItem(key, String(campaignId));
+  },
+
+  _clearLastCampaign() {
+    const key = this._lastCampaignStorageKey();
+    if (key) localStorage.removeItem(key);
+  },
+
+  async onLogin(user) {
     this.user = user;
     document.getElementById('user-display-name').textContent = `🎮 ${user.display_name || user.username}`;
+
+    const savedId = this._lastCampaignStorageKey() && localStorage.getItem(this._lastCampaignStorageKey());
+    if (savedId) {
+      try {
+        await this.enterCampaign(savedId);
+        return;
+      } catch {
+        this._clearLastCampaign();
+      }
+    }
+
     showScreen('dashboard-screen');
     Campaigns.load();
   },
@@ -79,6 +150,7 @@ const App = {
       const campaign = await apiFetch(`/campaigns/${campaignId}`);
       this.currentCampaign = campaign;
       this.joinedCampaignId = campaign.id;
+      this._saveLastCampaign(campaign.id);
 
       document.getElementById('campaign-name-header').textContent = campaign.name;
       const badge = document.getElementById('campaign-role-badge');
@@ -98,7 +170,11 @@ const App = {
       this.connectSocket(campaign.id);
       CampaignMusic.onEnterCampaign();
     } catch (err) {
+      if (String(campaignId) === localStorage.getItem(this._lastCampaignStorageKey() || '')) {
+        this._clearLastCampaign();
+      }
       showToast('Błąd wejścia do kampanii: ' + err.message, 'error');
+      throw err;
     }
   },
 
@@ -118,6 +194,11 @@ const App = {
       DMEconomy.load();
     }
     if (typeof TokenLibrary !== 'undefined') TokenLibrary.load();
+    if (typeof Bestiary !== 'undefined' && App.currentCampaign?.role === 'dm') Bestiary.load();
+    if (typeof Quests !== 'undefined') Quests.load();
+    if (typeof Handouts !== 'undefined') Handouts.load();
+    if (typeof WorldState !== 'undefined') WorldState.load();
+    if (typeof Soundboard !== 'undefined') Soundboard.load();
     if (App.socket) {
       App.socket.emit('get-initiative');
     }
@@ -192,11 +273,28 @@ const App = {
     });
 
     this.socket.on('chat-message', (data) => Chat.addMessage(data));
+    this.socket.on('chat-cleared', (data) => {
+      if (!this.currentCampaign || data?.campaignId !== this.currentCampaign.id) return;
+      Chat.onChatCleared(data.by);
+    });
     this.socket.on('system-message', (data) => Chat.addSystemMessage(data));
 
     this.socket.on('dice-roll', (data) => {
       Dice.addToLog(data);
       Chat.addDiceRollMessage(data);
+    });
+
+    if (typeof GroupRolls !== 'undefined') GroupRolls.bindSocketEvents(this.socket);
+    if (typeof Inspiration !== 'undefined') Inspiration.bindSocketEvents(this.socket);
+    if (typeof Quests !== 'undefined') Quests.bindSocketEvents(this.socket);
+    if (typeof Handouts !== 'undefined') Handouts.bindSocketEvents(this.socket);
+    if (typeof WorldState !== 'undefined') WorldState.bindSocketEvents(this.socket);
+    if (typeof Soundboard !== 'undefined') Soundboard.bindSocketEvents(this.socket);
+
+    this.socket.on('campaign-restored', (data) => {
+      if (!App.currentCampaign || data?.campaignId !== App.currentCampaign.id) return;
+      showToast('MG przywrócił backup kampanii — odświeżanie…', 'info');
+      setTimeout(() => window.location.reload(), 800);
     });
 
     this.socket.on('online-users', (users) => Chat.updateOnlineUsers(users));
@@ -212,6 +310,12 @@ const App = {
       showToast(data.message || 'Błąd walki', 'error');
       BattleMap.loadMap();
     });
+    this.socket.on('combat-damage-applied', (data) => {
+      if (!data || data.damage <= 0) return;
+      const token = BattleMap.tokens?.find((t) => t.id === data.tokenId);
+      const name = token?.entity_name || 'Cel';
+      showToast(`💥 ${name}: −${data.damage} HP (${data.hpCurrent}/${data.hpMax || '?'})`, 'success');
+    });
     this.socket.on('combat-target-result', (data) => {
       if (typeof MapCombat !== 'undefined') MapCombat.onTargetResult(data);
     });
@@ -219,6 +323,9 @@ const App = {
       if (typeof MapCombat !== 'undefined') MapCombat.playAttackFx(data, false);
     });
     this.socket.on('map-update', (data) => BattleMap.updateMap(data));
+    this.socket.on('map-settings-error', (data) => {
+      showToast(data?.message || 'Błąd zapisu ustawień mapy', 'error');
+    });
     this.socket.on('map-prop-triggered', (data) => {
       const msg = data?.name ? `${data.icon || '📦'} ${data.name} — efekt na mapie!` : 'Rekwizyt aktywowany';
       showToast(msg, 'info');
@@ -250,6 +357,11 @@ const App = {
       }
       if (typeof Chat !== 'undefined' && Chat.refreshDmPuppetPanel) Chat.refreshDmPuppetPanel();
     });
+    this.socket.on('character-resources-update', (data) => {
+      if (typeof Characters !== 'undefined' && Characters.refreshOpenSheetIfMatches) {
+        Characters.refreshOpenSheetIfMatches(data?.characterId);
+      }
+    });
     this.socket.on('character-rest', (data) => {
       const name = data?.characterName ? `${data.characterName}: ` : '';
       if (data?.type === 'long') {
@@ -268,6 +380,10 @@ const App = {
     });
 
     this.socket.on('character-hp-update', () => {
+      Characters.loadCampaignCharacters();
+    });
+
+    this.socket.on('characters-bulk-update', () => {
       Characters.loadCampaignCharacters();
     });
 
@@ -322,6 +438,8 @@ const App = {
   },
 
   leaveCampaign() {
+    this._clearLastCampaign();
+    if (typeof WorldState !== 'undefined') WorldState.onLeaveCampaign();
     if (typeof CampaignMusic !== 'undefined') CampaignMusic.onLeaveCampaign();
     this.joinedCampaignId = null;
     if (this.socket) {

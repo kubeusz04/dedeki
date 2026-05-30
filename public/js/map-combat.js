@@ -1,4 +1,30 @@
 // ===== Map tactical combat =====
+function mapCellTL(cx, cy) {
+  if (typeof BattleMap !== 'undefined' && BattleMap.cellTopLeftPx) {
+    return BattleMap.cellTopLeftPx(cx, cy);
+  }
+  const gsW = BattleMap?.settings?.grid_cell_width || BattleMap?.settings?.grid_size || 40;
+  const gsH = BattleMap?.settings?.grid_cell_height || BattleMap?.settings?.grid_size || 40;
+  return { x: cx * gsW, y: cy * gsH };
+}
+
+function mapCellCenter(cx, cy) {
+  if (typeof BattleMap !== 'undefined' && BattleMap.cellCenterPx) {
+    return BattleMap.cellCenterPx(cx, cy);
+  }
+  const gsW = BattleMap?.settings?.grid_cell_width || BattleMap?.settings?.grid_size || 40;
+  const gsH = BattleMap?.settings?.grid_cell_height || BattleMap?.settings?.grid_size || 40;
+  return { x: cx * gsW + gsW / 2, y: cy * gsH + gsH / 2 };
+}
+
+function mapCellSize() {
+  if (typeof BattleMap !== 'undefined' && BattleMap.cellSizePx) {
+    return BattleMap.cellSizePx();
+  }
+  const gs = BattleMap?.settings?.grid_size || 40;
+  return { w: gs, h: gs };
+}
+
 const MapCombat = {
   combat: null,
   blocking: new Set(),
@@ -398,13 +424,40 @@ const MapCombat = {
     return BattleMap.getCharacterForToken(token);
   },
 
+  defaultNpcWeapon(token) {
+    const notes = String(token?.stat_notes || '');
+    const dmgMatch = notes.match(/\((\d+d\d+(?:[+\-]\d+)?)\)/i);
+    const damage = dmgMatch ? dmgMatch[1] : '1d6';
+    return {
+      id: 'npc-default',
+      name: 'Atak',
+      damage,
+      damageType: 'bludgeoning',
+      range: '5 ft',
+      isProficient: true
+    };
+  },
+
+  npcCharFromToken(token) {
+    return {
+      name: token?.entity_name || 'NPC',
+      strength: 10,
+      dexterity: 14,
+      proficiency_bonus: 2,
+      level: 1
+    };
+  },
+
   startAttackTargeting(attackerToken) {
     const char = this.getCharacterForToken(attackerToken);
     if (!char && attackerToken.entity_type === 'player') {
       showToast('Token nie jest powiązany z postacią', 'warning');
       return;
     }
-    const weapons = char ? Dice.getCharacterWeapons(char) : [];
+    let weapons = char ? Dice.getCharacterWeapons(char) : [];
+    if (!weapons.length && attackerToken.entity_type !== 'player') {
+      weapons = [this.defaultNpcWeapon(attackerToken)];
+    }
     if (!weapons.length && attackerToken.entity_type === 'player') {
       showToast('Brak broni na karcie postaci', 'warning');
       return;
@@ -834,6 +887,8 @@ const MapCombat = {
       const char = this.getCharacterForToken(attacker);
       if (char && this.targeting.weapon) {
         Dice.executeWeaponAttack(char, this.targeting.weapon, { mapContext: ctx, forceDisadvantage: longRange });
+      } else if (BattleMap.isDm() && this.targeting.weapon) {
+        Dice.executeWeaponAttack(this.npcCharFromToken(attacker), this.targeting.weapon, { mapContext: ctx, forceDisadvantage: longRange });
       }
     } else if (this.targeting.mode === 'spell' && this.targeting.spell) {
       const char = this.getCharacterForToken(attacker);
@@ -867,15 +922,16 @@ const MapCombat = {
     const from = BattleMap.tokens.find((t) => t.id === data.fromTokenId);
     const to = BattleMap.tokens.find((t) => t.id === data.toTokenId);
     if (!from || !to) return;
-    const gs = BattleMap.settings?.grid_size || 40;
     const a = MapTactics.tokenAnchor(from);
     const b = MapTactics.tokenAnchor(to);
+    const ca = mapCellCenter(a.x, a.y);
+    const cb = mapCellCenter(b.x, b.y);
     this.attackEffects.push({
       type: data.type || 'melee',
-      x1: a.x * gs + gs / 2,
-      y1: a.y * gs + gs / 2,
-      x2: b.x * gs + gs / 2,
-      y2: b.y * gs + gs / 2,
+      x1: ca.x,
+      y1: ca.y,
+      x2: cb.x,
+      y2: cb.y,
       expires: Date.now() + 700,
       miss: !!data.miss
     });
@@ -916,15 +972,15 @@ const MapCombat = {
     });
   },
 
-  drawRangeOverlay(ctx, gs) {
+  drawRangeOverlay(ctx) {
     if (this.targeting) {
-      this._drawAttackRange(ctx, gs);
+      this._drawAttackRange(ctx);
       return;
     }
-    this.drawMovementRange(ctx, gs);
+    this.drawMovementRange(ctx);
   },
 
-  _drawAttackRange(ctx, gs) {
+  _drawAttackRange(ctx) {
     const attacker = BattleMap.tokens.find((t) => t.id === this.targeting.attackerTokenId);
     if (!attacker) return;
 
@@ -959,6 +1015,7 @@ const MapCombat = {
     const maxY = Math.min(gh - 1, anchor.y + drawMax);
 
     ctx.save();
+    const { w: cw, h: ch } = mapCellSize();
     // 5e: w długim zasięgu atakujesz z utrudnieniem → inny kolor
     const normalFill = isMelee ? 'rgba(166, 61, 47, 0.18)' : 'rgba(70, 200, 120, 0.16)';
     const normalStroke = isMelee ? 'rgba(166, 61, 47, 0.45)' : 'rgba(70, 200, 120, 0.5)';
@@ -980,8 +1037,9 @@ const MapCombat = {
         } else {
           continue;
         }
-        ctx.fillRect(x * gs, y * gs, gs, gs);
-        ctx.strokeRect(x * gs + 0.5, y * gs + 0.5, gs - 1, gs - 1);
+        const p = mapCellTL(x, y);
+        ctx.fillRect(p.x, p.y, cw, ch);
+        ctx.strokeRect(p.x + 0.5, p.y + 0.5, cw - 1, ch - 1);
       }
     }
 
@@ -996,16 +1054,19 @@ const MapCombat = {
       const inLong = drawLong && d > drawNormal && d <= drawLong;
       ctx.strokeStyle = inLong ? 'rgba(255, 210, 80, 0.95)' : 'rgba(80, 220, 120, 0.95)';
       ctx.lineWidth = 3;
-      const size = (t.size || 1) * gs;
+      const sizeW = (t.size || 1) * cw;
+      const sizeH = (t.size || 1) * ch;
+      const tl = mapCellTL(t.x, t.y);
       ctx.beginPath();
-      ctx.arc(t.x * gs + size / 2, t.y * gs + size / 2, size * 0.55, 0, Math.PI * 2);
+      ctx.arc(tl.x + sizeW / 2, tl.y + sizeH / 2, Math.max(sizeW, sizeH) * 0.55, 0, Math.PI * 2);
       ctx.stroke();
     });
     ctx.restore();
   },
 
-  drawMovementRange(ctx, gs) {
+  drawMovementRange(ctx) {
     if (!this.isMovementLimited()) return;
+    const { w: cw, h: ch } = mapCellSize();
 
     const activeId = this.getActiveTokenId();
     const token = activeId
@@ -1036,8 +1097,9 @@ const MapCombat = {
         const x = anchor.x + dx;
         const y = anchor.y + dy;
         if (x < 0 || y < 0 || x >= gw || y >= gh) continue;
-        ctx.fillRect(x * gs, y * gs, gs, gs);
-        ctx.strokeRect(x * gs + 0.5, y * gs + 0.5, gs - 1, gs - 1);
+        const p = mapCellTL(x, y);
+        ctx.fillRect(p.x, p.y, cw, ch);
+        ctx.strokeRect(p.x + 0.5, p.y + 0.5, cw - 1, ch - 1);
       }
     }
 
@@ -1053,20 +1115,23 @@ const MapCombat = {
       ctx.fillStyle = cost > remaining ? 'rgba(166, 61, 47, 0.85)' : 'rgba(201, 162, 39, 0.9)';
       ctx.font = 'bold 12px Cinzel, serif';
       ctx.textAlign = 'center';
-      ctx.fillText(`${cost} ft`, toX * gs + gs / 2, toY * gs - 4);
+      const tc = mapCellCenter(toX, toY);
+      ctx.fillText(`${cost} ft`, tc.x, tc.y - ch / 2 - 4);
       ctx.textAlign = 'start';
     }
 
     ctx.restore();
   },
 
-  drawBlocking(ctx, gs) {
+  drawBlocking(ctx) {
     if (!this.blocking.size) return;
+    const { w: cw, h: ch } = mapCellSize();
     ctx.save();
     ctx.fillStyle = 'rgba(60, 40, 30, 0.55)';
     this.blocking.forEach((key) => {
       const [x, y] = key.split(',').map(Number);
-      ctx.fillRect(x * gs, y * gs, gs, gs);
+      const p = mapCellTL(x, y);
+      ctx.fillRect(p.x, p.y, cw, ch);
     });
     ctx.restore();
   },
@@ -1083,11 +1148,14 @@ const MapCombat = {
     Dice.rollSavingThrow(ab, char);
   },
 
-  applyDamageToTarget(targetTokenId, amount) {
+  applyDamageToTarget(targetTokenId, amount, attackerTokenId) {
+    const attacker = attackerTokenId
+      || this.targeting?.attackerTokenId
+      || this.getActiveTokenId();
     App.socket?.emit('combat-apply-damage', {
       targetTokenId,
       amount,
-      attackerTokenId: this.getActiveTokenId()
+      attackerTokenId: attacker
     });
   }
 };

@@ -24,6 +24,8 @@ const MapCreator = {
       version: 1,
       settings: {
         grid_size: 40,
+        grid_cell_width: 40,
+        grid_cell_height: 40,
         grid_width: 25,
         grid_height: 18,
         background_color: '#3b2618',
@@ -54,8 +56,16 @@ const MapCreator = {
       version: 1,
       settings: {
         grid_size: BattleMap.settings.grid_size ?? 40,
+        grid_cell_width: BattleMap.settings.grid_cell_width > 0
+          ? BattleMap.settings.grid_cell_width
+          : (BattleMap.settings.grid_size ?? 40),
+        grid_cell_height: BattleMap.settings.grid_cell_height > 0
+          ? BattleMap.settings.grid_cell_height
+          : (BattleMap.settings.grid_size ?? 40),
         grid_width: BattleMap.settings.grid_width ?? 25,
         grid_height: BattleMap.settings.grid_height ?? 18,
+        grid_offset_x: BattleMap.settings.grid_offset_x ?? 0,
+        grid_offset_y: BattleMap.settings.grid_offset_y ?? 0,
         background_color: BattleMap.settings.background_color || '#3b2618',
         background_image: BattleMap.settings.background_image || '',
         map_blocking,
@@ -270,8 +280,11 @@ const MapCreator = {
       };
     }
     const s = this.draft.settings;
-    const gs = document.getElementById('mc-grid-size');
-    if (gs) s.grid_size = parseInt(gs.value, 10) || 40;
+    const cellW = document.getElementById('mc-grid-cell-w');
+    const cellH = document.getElementById('mc-grid-cell-h');
+    if (cellW) s.grid_cell_width = Math.max(20, Math.min(200, parseInt(cellW.value, 10) || 40));
+    if (cellH) s.grid_cell_height = Math.max(20, Math.min(200, parseInt(cellH.value, 10) || 40));
+    s.grid_size = Math.max(s.grid_cell_width || 40, s.grid_cell_height || 40);
     const gw = document.getElementById('mc-grid-w');
     if (gw) s.grid_width = Math.min(60, Math.max(5, parseInt(gw.value, 10) || 25));
     const gh = document.getElementById('mc-grid-h');
@@ -289,6 +302,9 @@ const MapCreator = {
     const meta = this._meta;
     const s = this.draft.settings;
 
+    const cellW = s.grid_cell_width > 0 ? s.grid_cell_width : (s.grid_size ?? 40);
+    const cellH = s.grid_cell_height > 0 ? s.grid_cell_height : (s.grid_size ?? 40);
+
     if (this.activeTab === 'general') {
       panel.innerHTML = `
         <div class="form-group"><label>Nazwa presetu</label><input type="text" id="mc-name" value="${escapeHtml(meta.name)}" maxlength="60"></div>
@@ -297,7 +313,8 @@ const MapCreator = {
         <div class="form-row">
           <div class="form-group"><label>Szerokość (kratki)</label><input type="number" id="mc-grid-w" min="5" max="60" value="${s.grid_width}"></div>
           <div class="form-group"><label>Wysokość (kratki)</label><input type="number" id="mc-grid-h" min="5" max="60" value="${s.grid_height}"></div>
-          <div class="form-group"><label>Rozmiar kratki (px)</label><input type="number" id="mc-grid-size" min="20" max="80" value="${s.grid_size}"></div>
+          <div class="form-group"><label>Kratka szer. (px)</label><input type="number" id="mc-grid-cell-w" min="20" max="200" value="${cellW}"></div>
+          <div class="form-group"><label>Kratka wys. (px)</label><input type="number" id="mc-grid-cell-h" min="20" max="200" value="${cellH}"></div>
         </div>
         <div class="form-group"><label>Kolor tła (bez grafiki)</label><input type="color" id="mc-bg-color" value="${escapeHtml(s.background_color || '#3b2618')}"></div>
         <label><input type="checkbox" id="mc-fog" ${s.fog_enabled ? 'checked' : ''}> Domyślnie włącz mgłę wojny po wczytaniu</label>

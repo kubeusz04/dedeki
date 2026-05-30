@@ -29,6 +29,76 @@ function pickDefined(data, fields) {
   return fields.filter((field) => data[field] !== undefined);
 }
 
+/** Odczyt przesunięcia siatki z kolumn DB lub zapasowo z combat_state._gridAlign */
+function clampGridCellMirror(n, fallback) {
+  const v = Math.round(Number(n));
+  if (!Number.isFinite(v) || v <= 0) return fallback;
+  return Math.max(20, Math.min(200, v));
+}
+
+function readGridAlignMirror(settings) {
+  try {
+    const raw = settings?.combat_state;
+    if (!raw) return null;
+    const c = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const ga = c && typeof c === 'object' ? c._gridAlign : null;
+    if (!ga || typeof ga !== 'object') return null;
+    return ga;
+  } catch (_e) {
+    return null;
+  }
+}
+
+function hydrateGridOffset(settings) {
+  if (!settings) return settings;
+  let ox = Number(settings.grid_offset_x);
+  let oy = Number(settings.grid_offset_y);
+  if (!Number.isFinite(ox)) ox = 0;
+  if (!Number.isFinite(oy)) oy = 0;
+  ox = Math.round(ox);
+  oy = Math.round(oy);
+  const ga = readGridAlignMirror(settings);
+  if (ox === 0 && oy === 0 && ga) {
+    ox = Math.round(Number(ga.x) || 0);
+    oy = Math.round(Number(ga.y) || 0);
+  }
+  settings.grid_offset_x = ox;
+  settings.grid_offset_y = oy;
+
+  const base = parseInt(settings.grid_size, 10) || 40;
+  let gsW = parseInt(settings.grid_cell_width, 10);
+  let gsH = parseInt(settings.grid_cell_height, 10);
+  if (gsW <= 0 && ga?.gsW > 0) gsW = clampGridCellMirror(ga.gsW, base);
+  if (gsH <= 0 && ga?.gsH > 0) gsH = clampGridCellMirror(ga.gsH, base);
+  if (gsW > 0) settings.grid_cell_width = gsW;
+  if (gsH > 0) settings.grid_cell_height = gsH;
+  return settings;
+}
+
+async function patchGridAlignMirror(campaignId, align) {
+  const res = await query('SELECT combat_state FROM map_settings WHERE campaign_id = $1', [campaignId]);
+  const row = one(res);
+  let combat = {};
+  try {
+    const parsed = JSON.parse(row?.combat_state || '{}');
+    combat = parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_e) {
+    combat = {};
+  }
+  const prev = combat._gridAlign && typeof combat._gridAlign === 'object' ? combat._gridAlign : {};
+  const base = clampGridCellMirror(prev.gsW, 40);
+  combat._gridAlign = {
+    x: Math.round(Number(align?.x ?? prev.x) || 0),
+    y: Math.round(Number(align?.y ?? prev.y) || 0),
+    gsW: clampGridCellMirror(align?.gsW ?? prev.gsW, base),
+    gsH: clampGridCellMirror(align?.gsH ?? prev.gsH, base)
+  };
+  await query(
+    'UPDATE map_settings SET combat_state = $1 WHERE campaign_id = $2',
+    [JSON.stringify(combat), campaignId]
+  );
+}
+
 const CHARACTER_INT_FIELDS = new Set([
   'level', 'experience_points',
   'strength', 'dexterity', 'constitution', 'intelligence', 'wisdom', 'charisma',
@@ -66,7 +136,7 @@ const CHARACTER_IMPORT_FIELDS = [
   'armor_proficiencies', 'weapon_proficiencies', 'tool_proficiencies', 'languages',
   'equipment', 'copper', 'silver', 'electrum', 'gold', 'platinum',
   'features', 'spellcasting_ability', 'spell_save_dc', 'spell_attack_bonus',
-  'spell_slots', 'spells_known', 'prepared_spells',
+  'spell_slots', 'spells_known', 'prepared_spells', 'class_resources',
   'age', 'height', 'weight', 'eyes', 'skin', 'hair', 'appearance_notes',
   'personality_traits', 'ideals', 'bonds', 'flaws', 'backstory', 'notes',
   'conditions', 'inspiration', 'roll_templates', 'weapons', 'avatar_url', 'portrait_url'
@@ -359,11 +429,13 @@ async function runMigrations() {
     'ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS initiative_round INTEGER DEFAULT 1',
     'ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS delete_password_hash TEXT DEFAULT \'\'',
     'ALTER TABLE characters ADD COLUMN IF NOT EXISTS portrait_url TEXT DEFAULT \'\'',
+    'ALTER TABLE characters ADD COLUMN IF NOT EXISTS class_resources TEXT DEFAULT \'[]\'',
     'ALTER TABLE map_tokens ADD COLUMN IF NOT EXISTS hp_max INTEGER DEFAULT 0',
     'ALTER TABLE map_tokens ADD COLUMN IF NOT EXISTS hp_current INTEGER DEFAULT 0',
     'ALTER TABLE map_tokens ADD COLUMN IF NOT EXISTS ac INTEGER DEFAULT 0',
     'ALTER TABLE map_tokens ADD COLUMN IF NOT EXISTS stat_notes TEXT DEFAULT \'\'',
     'ALTER TABLE map_tokens ADD COLUMN IF NOT EXISTS speed_ft INTEGER DEFAULT 0',
+    'ALTER TABLE map_tokens ADD COLUMN IF NOT EXISTS conditions TEXT DEFAULT \'[]\'',
     'ALTER TABLE map_settings ADD COLUMN IF NOT EXISTS movement_trails TEXT DEFAULT \'{}\'',
     'ALTER TABLE map_settings ADD COLUMN IF NOT EXISTS trails_enabled INTEGER DEFAULT 1',
     'ALTER TABLE map_settings ADD COLUMN IF NOT EXISTS combat_state TEXT DEFAULT \'{}\'',
@@ -371,6 +443,16 @@ async function runMigrations() {
     'ALTER TABLE map_settings ADD COLUMN IF NOT EXISTS los_fog_blocks INTEGER DEFAULT 1',
     'ALTER TABLE map_settings ADD COLUMN IF NOT EXISTS grid_opacity INTEGER DEFAULT 100',
     'ALTER TABLE map_settings ADD COLUMN IF NOT EXISTS map_zones TEXT DEFAULT \'[]\'',
+    'ALTER TABLE map_settings ADD COLUMN IF NOT EXISTS grid_offset_x INTEGER DEFAULT 0',
+    'ALTER TABLE map_settings ADD COLUMN IF NOT EXISTS grid_offset_y INTEGER DEFAULT 0',
+    'ALTER TABLE campaign_music ADD COLUMN IF NOT EXISTS source_type TEXT DEFAULT \'upload\'',
+    'ALTER TABLE campaign_music ADD COLUMN IF NOT EXISTS youtube_id TEXT DEFAULT \'\'',
+    'ALTER TABLE campaign_music ADD COLUMN IF NOT EXISTS source_url TEXT DEFAULT \'\'',
+    'ALTER TABLE sound_effects ADD COLUMN IF NOT EXISTS source_type TEXT DEFAULT \'upload\'',
+    'ALTER TABLE sound_effects ADD COLUMN IF NOT EXISTS youtube_id TEXT DEFAULT \'\'',
+    'ALTER TABLE sound_effects ADD COLUMN IF NOT EXISTS source_url TEXT DEFAULT \'\'',
+    'ALTER TABLE map_settings ADD COLUMN IF NOT EXISTS grid_cell_width INTEGER DEFAULT 0',
+    'ALTER TABLE map_settings ADD COLUMN IF NOT EXISTS grid_cell_height INTEGER DEFAULT 0',
     `CREATE TABLE IF NOT EXISTS map_pins (
       id TEXT PRIMARY KEY,
       campaign_id TEXT NOT NULL,
@@ -426,6 +508,36 @@ async function runMigrations() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
     )`,
+    `CREATE TABLE IF NOT EXISTS custom_monsters (
+      id TEXT PRIMARY KEY,
+      campaign_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      size TEXT DEFAULT 'Średni',
+      monster_type TEXT DEFAULT 'humanoid',
+      alignment TEXT DEFAULT 'neutralny',
+      cr TEXT DEFAULT '0',
+      ac INTEGER DEFAULT 10,
+      hp_max INTEGER DEFAULT 1,
+      hp_formula TEXT DEFAULT '',
+      speed TEXT DEFAULT '9 m',
+      stats TEXT DEFAULT '{}',
+      saving_throws TEXT DEFAULT '[]',
+      skills TEXT DEFAULT '[]',
+      damage_resistances TEXT DEFAULT '',
+      damage_immunities TEXT DEFAULT '',
+      condition_immunities TEXT DEFAULT '',
+      senses TEXT DEFAULT '',
+      languages TEXT DEFAULT '',
+      attacks TEXT DEFAULT '[]',
+      traits TEXT DEFAULT '[]',
+      actions TEXT DEFAULT '[]',
+      legendary_actions TEXT DEFAULT '[]',
+      reactions TEXT DEFAULT '[]',
+      notes TEXT DEFAULT '',
+      image_url TEXT DEFAULT '',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
+    )`,
     `CREATE TABLE IF NOT EXISTS loot_grants (
       id TEXT PRIMARY KEY,
       campaign_id TEXT NOT NULL,
@@ -449,6 +561,23 @@ async function runMigrations() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
     )`,
+    `CREATE TABLE IF NOT EXISTS campaign_music_playlists (
+      id TEXT PRIMARY KEY,
+      campaign_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      shuffle INTEGER DEFAULT 0,
+      auto_advance INTEGER DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
+    )`,
+    `CREATE TABLE IF NOT EXISTS campaign_music_playlist_items (
+      id TEXT PRIMARY KEY,
+      playlist_id TEXT NOT NULL,
+      track_id TEXT NOT NULL,
+      sort_order INTEGER DEFAULT 0,
+      FOREIGN KEY (playlist_id) REFERENCES campaign_music_playlists(id) ON DELETE CASCADE,
+      FOREIGN KEY (track_id) REFERENCES campaign_music(id) ON DELETE CASCADE
+    )`,
     `CREATE TABLE IF NOT EXISTS map_presets (
       id TEXT PRIMARY KEY,
       campaign_id TEXT NOT NULL,
@@ -461,6 +590,71 @@ async function runMigrations() {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
       FOREIGN KEY (dm_id) REFERENCES users(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS quests (
+      id TEXT PRIMARY KEY,
+      campaign_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      quest_type TEXT DEFAULT 'side',
+      status TEXT DEFAULT 'active',
+      xp_reward INTEGER DEFAULT 0,
+      gold_reward INTEGER DEFAULT 0,
+      objectives TEXT DEFAULT '[]',
+      linked_npc_ids TEXT DEFAULT '[]',
+      dm_notes TEXT DEFAULT '',
+      visible_to_players INTEGER DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
+    )`,
+    `CREATE TABLE IF NOT EXISTS handouts (
+      id TEXT PRIMARY KEY,
+      campaign_id TEXT NOT NULL,
+      dm_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      file_url TEXT NOT NULL,
+      mime_type TEXT DEFAULT '',
+      file_size INTEGER DEFAULT 0,
+      recipient_user_ids TEXT DEFAULT '[]',
+      is_revealed INTEGER DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
+      FOREIGN KEY (dm_id) REFERENCES users(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS campaign_world_state (
+      campaign_id TEXT PRIMARY KEY,
+      calendar_type TEXT DEFAULT 'faerun',
+      year INTEGER DEFAULT 1492,
+      month_index INTEGER DEFAULT 0,
+      day INTEGER DEFAULT 1,
+      hour INTEGER DEFAULT 8,
+      minute INTEGER DEFAULT 0,
+      weather TEXT DEFAULT 'clear',
+      wind TEXT DEFAULT 'calm',
+      temperature TEXT DEFAULT 'temperate',
+      moon_phase INTEGER DEFAULT 0,
+      auto_weather INTEGER DEFAULT 1,
+      notes TEXT DEFAULT '',
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
+    )`,
+    `CREATE TABLE IF NOT EXISTS sound_effects (
+      id TEXT PRIMARY KEY,
+      campaign_id TEXT NOT NULL,
+      dm_id TEXT,
+      name TEXT NOT NULL,
+      category TEXT DEFAULT 'sfx',
+      file_url TEXT NOT NULL,
+      mime_type TEXT DEFAULT '',
+      file_size INTEGER DEFAULT 0,
+      icon TEXT DEFAULT '',
+      tags TEXT DEFAULT '[]',
+      default_volume REAL DEFAULT 0.7,
+      is_loop INTEGER DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
     )`
   ];
   for (const sql of migrations) {
@@ -727,7 +921,7 @@ const characterOps = {
       'armor_proficiencies', 'weapon_proficiencies', 'tool_proficiencies', 'languages',
       'equipment', 'copper', 'silver', 'electrum', 'gold', 'platinum',
       'features', 'spellcasting_ability', 'spell_save_dc', 'spell_attack_bonus',
-      'spell_slots', 'spells_known', 'prepared_spells',
+      'spell_slots', 'spells_known', 'prepared_spells', 'class_resources',
       'age', 'height', 'weight', 'eyes', 'skin', 'hair', 'appearance_notes',
       'personality_traits', 'ideals', 'bonds', 'flaws', 'backstory', 'notes',
       'conditions', 'inspiration', 'campaign_id', 'roll_templates', 'weapons',
@@ -763,7 +957,7 @@ const characterOps = {
       'armor_proficiencies', 'weapon_proficiencies', 'tool_proficiencies', 'languages',
       'equipment', 'copper', 'silver', 'electrum', 'gold', 'platinum',
       'features', 'spellcasting_ability', 'spell_save_dc', 'spell_attack_bonus',
-      'spell_slots', 'spells_known', 'prepared_spells',
+      'spell_slots', 'spells_known', 'prepared_spells', 'class_resources',
       'age', 'height', 'weight', 'eyes', 'skin', 'hair', 'appearance_notes',
       'personality_traits', 'ideals', 'bonds', 'flaws', 'backstory', 'notes',
       'conditions', 'inspiration', 'campaign_id', 'roll_templates', 'weapons',
@@ -807,6 +1001,25 @@ const characterOps = {
     return this.findById(characterId);
   },
 
+  // Restoruje zasoby klasowe wg ich `recoversOn`. Returns serialized JSON.
+  _restoreClassResources(rawJson, restType) {
+    let resources;
+    try { resources = JSON.parse(rawJson || '[]'); } catch { resources = []; }
+    if (!Array.isArray(resources)) return JSON.stringify([]);
+    const updated = resources.map((r) => {
+      if (!r || typeof r !== 'object') return r;
+      const trigger = String(r.recoversOn || 'long').toLowerCase();
+      if (restType === 'long' && (trigger === 'long' || trigger === 'short')) {
+        return { ...r, current: parseInt(r.max, 10) || 0 };
+      }
+      if (restType === 'short' && trigger === 'short') {
+        return { ...r, current: parseInt(r.max, 10) || 0 };
+      }
+      return r;
+    });
+    return JSON.stringify(updated);
+  },
+
   async longRest(characterId) {
     const char = await this.findById(characterId);
     if (!char) return null;
@@ -814,17 +1027,19 @@ const characterOps = {
     const hd = parseInt(char.hit_dice, 10) || 1;
     const remainingHd = parseInt(char.hit_dice_remaining, 10) || 0;
     const restoredHd = Math.min(hd, remainingHd + Math.max(1, Math.floor(hd / 2)));
+    const restoredResources = this._restoreClassResources(char.class_resources, 'long');
     await query(
       `UPDATE characters SET
          current_hp = $1,
          temp_hp = 0,
          spell_slots = $2,
          hit_dice_remaining = $3,
+         class_resources = $4,
          death_save_successes = 0,
          death_save_failures = 0,
          updated_at = CURRENT_TIMESTAMP
-       WHERE id = $4`,
-      [max, JSON.stringify({ used: {} }), restoredHd, characterId]
+       WHERE id = $5`,
+      [max, JSON.stringify({ used: {} }), restoredHd, restoredResources, characterId]
     );
     return this.findById(characterId);
   },
@@ -848,16 +1063,47 @@ const characterOps = {
     if (char.char_class === 'Warlock') {
       newSlots = JSON.stringify({ used: {} });
     }
+    const restoredResources = this._restoreClassResources(char.class_resources, 'short');
     await query(
       `UPDATE characters SET
          current_hp = $1,
          hit_dice_remaining = $2,
          spell_slots = $3,
+         class_resources = $4,
          updated_at = CURRENT_TIMESTAMP
-       WHERE id = $4`,
-      [newHp, remaining - spend, newSlots, characterId]
+       WHERE id = $5`,
+      [newHp, remaining - spend, newSlots, restoredResources, characterId]
     );
     return { character: await this.findById(characterId), healed, hitDiceSpent: spend };
+  },
+
+  async setClassResources(characterId, resources) {
+    const json = JSON.stringify(Array.isArray(resources) ? resources : []);
+    await query(
+      'UPDATE characters SET class_resources = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      [json, characterId]
+    );
+    return this.findById(characterId);
+  },
+
+  async setInspiration(characterId, value) {
+    const v = Math.max(0, parseInt(value, 10) || 0);
+    await query(
+      'UPDATE characters SET inspiration = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      [v, characterId]
+    );
+    return this.findById(characterId);
+  },
+
+  async addInspiration(characterId, delta) {
+    const c = await this.findById(characterId);
+    if (!c) return null;
+    const next = Math.max(0, (parseInt(c.inspiration, 10) || 0) + (parseInt(delta, 10) || 0));
+    await query(
+      'UPDATE characters SET inspiration = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      [next, characterId]
+    );
+    return this.findById(characterId);
   },
 
   exportCharacter(character) {
@@ -942,6 +1188,11 @@ const messageOps = {
     }
     const res = await query('SELECT * FROM messages WHERE campaign_id = $1 ORDER BY created_at DESC LIMIT $2', [campaignId, limit]);
     return res.rows.reverse();
+  },
+
+  async deleteAllByCampaign(campaignId) {
+    const res = await query('DELETE FROM messages WHERE campaign_id = $1', [campaignId]);
+    return res.rowCount || 0;
   }
 };
 
@@ -1272,7 +1523,7 @@ const mapOps = {
 
   async getSettings(campaignId) {
     const res = await query('SELECT * FROM map_settings WHERE campaign_id = $1', [campaignId]);
-    return one(res);
+    return hydrateGridOffset(one(res));
   },
 
   async addToken(campaignId, data) {
@@ -1397,6 +1648,57 @@ const mapOps = {
     await query('DELETE FROM map_tokens WHERE id = $1', [id]);
   },
 
+  // ===== Conditions on tokens =====
+  _parseConditions(raw) {
+    let arr;
+    try { arr = JSON.parse(raw || '[]'); } catch { arr = []; }
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((c) => c && typeof c === 'object' && c.id)
+      .map((c) => ({
+        id: String(c.id).slice(0, 40),
+        name: String(c.name || c.id).slice(0, 40),
+        emoji: String(c.emoji || '⚠️').slice(0, 8),
+        color: String(c.color || '#888').slice(0, 16),
+        durationLeft: c.durationLeft == null ? null : Math.max(0, parseInt(c.durationLeft, 10) || 0),
+        appliedAt: c.appliedAt || Date.now(),
+        notes: c.notes ? String(c.notes).slice(0, 200) : ''
+      }));
+  },
+
+  async setTokenConditions(id, conditions) {
+    const parsed = this._parseConditions(JSON.stringify(Array.isArray(conditions) ? conditions : []));
+    await query('UPDATE map_tokens SET conditions = $1 WHERE id = $2', [JSON.stringify(parsed), id]);
+    return this.getTokenById(id);
+  },
+
+  // Tickuje czas trwania stanów na początku tury danego tokenu.
+  // Zwraca: { token, expired: [{name, emoji}], remaining: [...] }
+  async tickConditionsForToken(id) {
+    const token = await this.getTokenById(id);
+    if (!token) return { token: null, expired: [], remaining: [] };
+    const list = this._parseConditions(token.conditions);
+    if (!list.length) return { token, expired: [], remaining: list };
+    const expired = [];
+    const remaining = [];
+    let changed = false;
+    list.forEach((c) => {
+      if (c.durationLeft == null) {
+        remaining.push(c);
+        return;
+      }
+      const next = c.durationLeft - 1;
+      changed = true;
+      if (next <= 0) expired.push(c);
+      else remaining.push({ ...c, durationLeft: next });
+    });
+    if (changed) {
+      await query('UPDATE map_tokens SET conditions = $1 WHERE id = $2', [JSON.stringify(remaining), id]);
+    }
+    const updated = changed ? await this.getTokenById(id) : token;
+    return { token: updated, expired, remaining };
+  },
+
   async clearTokens(campaignId) {
     await query('DELETE FROM map_tokens WHERE campaign_id = $1', [campaignId]);
   },
@@ -1478,7 +1780,8 @@ const mapOps = {
 
   async updateSettings(campaignId, data) {
     const allowedFields = [
-      'grid_size', 'grid_width', 'grid_height', 'grid_opacity', 'background_color', 'background_image',
+      'grid_size', 'grid_cell_width', 'grid_cell_height', 'grid_width', 'grid_height', 'grid_opacity', 'grid_offset_x', 'grid_offset_y',
+      'background_color', 'background_image',
       'fog_enabled', 'fog_revealed', 'last_token_move', 'movement_trails', 'trails_enabled',
       'combat_state', 'map_blocking', 'map_zones', 'los_fog_blocks'
     ];
@@ -1496,13 +1799,73 @@ const mapOps = {
       const n = parseInt(data.grid_opacity, 10);
       data.grid_opacity = Math.max(0, Math.min(100, Number.isNaN(n) ? 100 : n));
     }
-    if (used.length === 0) return this.getSettings(campaignId);
+    if (used.includes('grid_offset_x')) {
+      data.grid_offset_x = Math.round(Number(data.grid_offset_x) || 0);
+    }
+    if (used.includes('grid_offset_y')) {
+      data.grid_offset_y = Math.round(Number(data.grid_offset_y) || 0);
+    }
+    if (used.includes('grid_cell_width')) {
+      const n = parseInt(data.grid_cell_width, 10);
+      data.grid_cell_width = Math.max(20, Math.min(200, Number.isNaN(n) ? 40 : n));
+    }
+    if (used.includes('grid_cell_height')) {
+      const n = parseInt(data.grid_cell_height, 10);
+      data.grid_cell_height = Math.max(20, Math.min(200, Number.isNaN(n) ? 40 : n));
+    }
+    if (used.includes('grid_size')) {
+      const n = parseInt(data.grid_size, 10);
+      data.grid_size = Math.max(20, Math.min(200, Number.isNaN(n) ? 40 : n));
+      if (!used.includes('grid_cell_width')) data.grid_cell_width = data.grid_size;
+      if (!used.includes('grid_cell_height')) data.grid_cell_height = data.grid_size;
+    }
+
+    const touchesGridAlign = used.some((f) => /grid_offset|grid_cell|grid_size/.test(f));
+    let gridAlignMirror = null;
+    if (touchesGridAlign) {
+      const current = await this.getSettings(campaignId);
+      gridAlignMirror = {
+        x: data.grid_offset_x !== undefined
+          ? Math.round(Number(data.grid_offset_x) || 0)
+          : Math.round(Number(current?.grid_offset_x) || 0),
+        y: data.grid_offset_y !== undefined
+          ? Math.round(Number(data.grid_offset_y) || 0)
+          : Math.round(Number(current?.grid_offset_y) || 0),
+        gsW: data.grid_cell_width !== undefined
+          ? clampGridCellMirror(data.grid_cell_width, current?.grid_cell_width || current?.grid_size || 40)
+          : clampGridCellMirror(current?.grid_cell_width || current?.grid_size, 40),
+        gsH: data.grid_cell_height !== undefined
+          ? clampGridCellMirror(data.grid_cell_height, current?.grid_cell_height || current?.grid_size || 40)
+          : clampGridCellMirror(current?.grid_cell_height || current?.grid_size, 40)
+      };
+    }
+
+    if (used.length === 0) {
+      if (gridAlignMirror) {
+        await patchGridAlignMirror(campaignId, gridAlignMirror);
+      }
+      return this.getSettings(campaignId);
+    }
 
     const setParts = used.map((field, idx) => `${field} = $${idx + 1}`);
     const values = used.map((field) => data[field]);
     values.push(campaignId);
 
-    await query(`UPDATE map_settings SET ${setParts.join(', ')} WHERE campaign_id = $${values.length}`, values);
+    try {
+      await query(`UPDATE map_settings SET ${setParts.join(', ')} WHERE campaign_id = $${values.length}`, values);
+    } catch (err) {
+      const msg = String(err?.message || err);
+      const onlyGridAlign = used.every((f) => /grid_offset|grid_cell|grid_size/.test(f));
+      if (gridAlignMirror && (onlyGridAlign || /grid_offset|grid_cell/i.test(msg))) {
+        await patchGridAlignMirror(campaignId, gridAlignMirror);
+        return this.getSettings(campaignId);
+      }
+      throw err;
+    }
+
+    if (gridAlignMirror) {
+      await patchGridAlignMirror(campaignId, gridAlignMirror);
+    }
     return this.getSettings(campaignId);
   },
 
@@ -1521,9 +1884,13 @@ const mapOps = {
       version: 1,
       settings: {
         grid_size: settings?.grid_size ?? 40,
+        grid_cell_width: settings?.grid_cell_width > 0 ? settings.grid_cell_width : (settings?.grid_size ?? 40),
+        grid_cell_height: settings?.grid_cell_height > 0 ? settings.grid_cell_height : (settings?.grid_size ?? 40),
         grid_width: settings?.grid_width ?? 25,
         grid_height: settings?.grid_height ?? 18,
         grid_opacity: settings?.grid_opacity ?? 100,
+        grid_offset_x: settings?.grid_offset_x ?? 0,
+        grid_offset_y: settings?.grid_offset_y ?? 0,
         background_color: settings?.background_color || '#3b2618',
         background_image: settings?.background_image || '',
         map_blocking,
@@ -1592,9 +1959,13 @@ const mapOps = {
 
     await this.updateSettings(campaignId, {
       grid_size: s.grid_size ?? 40,
+      grid_cell_width: s.grid_cell_width > 0 ? s.grid_cell_width : (s.grid_size ?? 40),
+      grid_cell_height: s.grid_cell_height > 0 ? s.grid_cell_height : (s.grid_size ?? 40),
       grid_width: s.grid_width ?? 25,
       grid_height: s.grid_height ?? 18,
       grid_opacity: s.grid_opacity ?? 100,
+      grid_offset_x: s.grid_offset_x ?? 0,
+      grid_offset_y: s.grid_offset_y ?? 0,
       background_color: s.background_color || '#3b2618',
       background_image: s.background_image || '',
       map_blocking: JSON.stringify(s.map_blocking || []),
@@ -2163,13 +2534,18 @@ const combatOps = {
     const control = await this.canControlToken(campaignId, userId, userRole, attacker);
     if (!control.ok) return control;
 
-    const isActive = await this.isActiveCombatToken(campaignId, attackerTokenId);
-    if (!isActive) return { ok: false, reason: 'not_your_turn' };
+    const movementLimited = await this.isMovementLimited(campaignId);
+    if (movementLimited) {
+      const isActive = await this.isActiveCombatToken(campaignId, attackerTokenId);
+      if (!isActive && userRole !== 'dm') {
+        return { ok: false, reason: 'not_your_turn' };
+      }
+    }
 
     const settings = await mapOps.getSettings(campaignId);
     const state = this.parseCombatState(settings);
     const turn = state.tokens[attackerTokenId];
-    if (turn?.actionUsed && !opts.allowFree) {
+    if (movementLimited && turn?.actionUsed && !opts.allowFree && userRole !== 'dm') {
       return { ok: false, reason: 'action_used' };
     }
 
@@ -2723,6 +3099,525 @@ const customItemOps = {
   }
 };
 
+// ===== Custom monsters (Bestiary) =====
+const customMonsterOps = {
+  _shape(row) {
+    if (!row) return null;
+    const parseJSON = (raw, fallback) => {
+      if (!raw) return fallback;
+      if (typeof raw !== 'string') return raw;
+      try { const v = JSON.parse(raw); return v == null ? fallback : v; } catch { return fallback; }
+    };
+    return {
+      id: row.id,
+      campaign_id: row.campaign_id,
+      name: row.name || 'Bez nazwy',
+      size: row.size || 'Średni',
+      monster_type: row.monster_type || 'humanoid',
+      alignment: row.alignment || 'neutralny',
+      cr: row.cr || '0',
+      ac: parseInt(row.ac, 10) || 10,
+      hp_max: parseInt(row.hp_max, 10) || 1,
+      hp_formula: row.hp_formula || '',
+      speed: row.speed || '9 m',
+      stats: parseJSON(row.stats, { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 }),
+      saving_throws: parseJSON(row.saving_throws, []),
+      skills: parseJSON(row.skills, []),
+      damage_resistances: row.damage_resistances || '',
+      damage_immunities: row.damage_immunities || '',
+      condition_immunities: row.condition_immunities || '',
+      senses: row.senses || '',
+      languages: row.languages || '',
+      attacks: parseJSON(row.attacks, []),
+      traits: parseJSON(row.traits, []),
+      actions: parseJSON(row.actions, []),
+      legendary_actions: parseJSON(row.legendary_actions, []),
+      reactions: parseJSON(row.reactions, []),
+      notes: row.notes || '',
+      image_url: row.image_url || '',
+      created_at: row.created_at
+    };
+  },
+
+  async listByCampaign(campaignId) {
+    const res = await query('SELECT * FROM custom_monsters WHERE campaign_id = $1 ORDER BY name', [campaignId]);
+    return res.rows.map((r) => this._shape(r));
+  },
+
+  async findById(id) {
+    const res = await query('SELECT * FROM custom_monsters WHERE id = $1', [id]);
+    return this._shape(one(res));
+  },
+
+  _normalizeData(data) {
+    return {
+      name: String(data.name || 'Bez nazwy').slice(0, 80),
+      size: String(data.size || 'Średni').slice(0, 30),
+      monster_type: String(data.monster_type || 'humanoid').slice(0, 30),
+      alignment: String(data.alignment || 'neutralny').slice(0, 30),
+      cr: String(data.cr || '0').slice(0, 10),
+      ac: parseInt(data.ac, 10) || 10,
+      hp_max: parseInt(data.hp_max, 10) || 1,
+      hp_formula: String(data.hp_formula || '').slice(0, 60),
+      speed: String(data.speed || '9 m').slice(0, 60),
+      stats: JSON.stringify(data.stats || { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 }),
+      saving_throws: JSON.stringify(Array.isArray(data.saving_throws) ? data.saving_throws : []),
+      skills: JSON.stringify(Array.isArray(data.skills) ? data.skills : []),
+      damage_resistances: String(data.damage_resistances || '').slice(0, 200),
+      damage_immunities: String(data.damage_immunities || '').slice(0, 200),
+      condition_immunities: String(data.condition_immunities || '').slice(0, 200),
+      senses: String(data.senses || '').slice(0, 200),
+      languages: String(data.languages || '').slice(0, 200),
+      attacks: JSON.stringify(Array.isArray(data.attacks) ? data.attacks : []),
+      traits: JSON.stringify(Array.isArray(data.traits) ? data.traits : []),
+      actions: JSON.stringify(Array.isArray(data.actions) ? data.actions : []),
+      legendary_actions: JSON.stringify(Array.isArray(data.legendary_actions) ? data.legendary_actions : []),
+      reactions: JSON.stringify(Array.isArray(data.reactions) ? data.reactions : []),
+      notes: String(data.notes || ''),
+      image_url: String(data.image_url || '').slice(0, 500)
+    };
+  },
+
+  async create(campaignId, data) {
+    const id = uuidv4();
+    const n = this._normalizeData(data);
+    await query(
+      `INSERT INTO custom_monsters (
+        id, campaign_id, name, size, monster_type, alignment, cr, ac, hp_max, hp_formula, speed,
+        stats, saving_throws, skills, damage_resistances, damage_immunities, condition_immunities,
+        senses, languages, attacks, traits, actions, legendary_actions, reactions, notes, image_url
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`,
+      [
+        id, campaignId, n.name, n.size, n.monster_type, n.alignment, n.cr, n.ac, n.hp_max, n.hp_formula, n.speed,
+        n.stats, n.saving_throws, n.skills, n.damage_resistances, n.damage_immunities, n.condition_immunities,
+        n.senses, n.languages, n.attacks, n.traits, n.actions, n.legendary_actions, n.reactions, n.notes, n.image_url
+      ]
+    );
+    return this.findById(id);
+  },
+
+  async update(id, data) {
+    const n = this._normalizeData(data);
+    await query(
+      `UPDATE custom_monsters SET
+        name=$1, size=$2, monster_type=$3, alignment=$4, cr=$5, ac=$6, hp_max=$7, hp_formula=$8, speed=$9,
+        stats=$10, saving_throws=$11, skills=$12, damage_resistances=$13, damage_immunities=$14,
+        condition_immunities=$15, senses=$16, languages=$17, attacks=$18, traits=$19, actions=$20,
+        legendary_actions=$21, reactions=$22, notes=$23, image_url=$24
+      WHERE id=$25`,
+      [
+        n.name, n.size, n.monster_type, n.alignment, n.cr, n.ac, n.hp_max, n.hp_formula, n.speed,
+        n.stats, n.saving_throws, n.skills, n.damage_resistances, n.damage_immunities,
+        n.condition_immunities, n.senses, n.languages, n.attacks, n.traits, n.actions,
+        n.legendary_actions, n.reactions, n.notes, n.image_url, id
+      ]
+    );
+    return this.findById(id);
+  },
+
+  async delete(id) {
+    await query('DELETE FROM custom_monsters WHERE id = $1', [id]);
+  }
+};
+
+const questOps = {
+  ALLOWED_TYPES: ['main', 'side', 'personal'],
+  ALLOWED_STATUSES: ['active', 'completed', 'failed', 'abandoned'],
+
+  _shape(row) {
+    if (!row) return null;
+    const parseJSON = (raw, fallback) => {
+      if (!raw) return fallback;
+      if (typeof raw !== 'string') return raw;
+      try { const v = JSON.parse(raw); return v == null ? fallback : v; } catch { return fallback; }
+    };
+    return {
+      id: row.id,
+      campaign_id: row.campaign_id,
+      title: row.title || 'Bez nazwy',
+      description: row.description || '',
+      quest_type: row.quest_type || 'side',
+      status: row.status || 'active',
+      xp_reward: parseInt(row.xp_reward, 10) || 0,
+      gold_reward: parseInt(row.gold_reward, 10) || 0,
+      objectives: parseJSON(row.objectives, []),
+      linked_npc_ids: parseJSON(row.linked_npc_ids, []),
+      dm_notes: row.dm_notes || '',
+      visible_to_players: !!row.visible_to_players,
+      created_at: row.created_at,
+      updated_at: row.updated_at
+    };
+  },
+
+  _normalizeObjectives(arr) {
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((o) => {
+        if (typeof o === 'string') return { text: o.slice(0, 200), done: false };
+        return {
+          text: String(o.text || '').slice(0, 200),
+          done: !!o.done
+        };
+      })
+      .filter((o) => o.text.length > 0)
+      .slice(0, 30);
+  },
+
+  _normalize(data) {
+    const type = this.ALLOWED_TYPES.includes(data.quest_type) ? data.quest_type : 'side';
+    const status = this.ALLOWED_STATUSES.includes(data.status) ? data.status : 'active';
+    return {
+      title: String(data.title || 'Bez nazwy').slice(0, 120),
+      description: String(data.description || '').slice(0, 4000),
+      quest_type: type,
+      status,
+      xp_reward: parseInt(data.xp_reward, 10) || 0,
+      gold_reward: parseInt(data.gold_reward, 10) || 0,
+      objectives: JSON.stringify(this._normalizeObjectives(data.objectives || [])),
+      linked_npc_ids: JSON.stringify(Array.isArray(data.linked_npc_ids) ? data.linked_npc_ids.slice(0, 20).map(String) : []),
+      dm_notes: String(data.dm_notes || '').slice(0, 4000),
+      visible_to_players: data.visible_to_players === false ? 0 : 1
+    };
+  },
+
+  async listByCampaign(campaignId, includeHidden = true) {
+    const res = await query('SELECT * FROM quests WHERE campaign_id = $1 ORDER BY status, quest_type, created_at DESC', [campaignId]);
+    let rows = res.rows.map((r) => this._shape(r));
+    if (!includeHidden) rows = rows.filter((q) => q.visible_to_players);
+    return rows;
+  },
+
+  async findById(id) {
+    const res = await query('SELECT * FROM quests WHERE id = $1', [id]);
+    return this._shape(one(res));
+  },
+
+  async create(campaignId, data) {
+    const id = uuidv4();
+    const n = this._normalize(data);
+    await query(
+      `INSERT INTO quests (
+        id, campaign_id, title, description, quest_type, status,
+        xp_reward, gold_reward, objectives, linked_npc_ids, dm_notes, visible_to_players
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [id, campaignId, n.title, n.description, n.quest_type, n.status,
+       n.xp_reward, n.gold_reward, n.objectives, n.linked_npc_ids, n.dm_notes, n.visible_to_players]
+    );
+    return this.findById(id);
+  },
+
+  async update(id, data) {
+    const n = this._normalize(data);
+    await query(
+      `UPDATE quests SET
+        title=$1, description=$2, quest_type=$3, status=$4,
+        xp_reward=$5, gold_reward=$6, objectives=$7, linked_npc_ids=$8,
+        dm_notes=$9, visible_to_players=$10, updated_at=CURRENT_TIMESTAMP
+      WHERE id=$11`,
+      [n.title, n.description, n.quest_type, n.status,
+       n.xp_reward, n.gold_reward, n.objectives, n.linked_npc_ids,
+       n.dm_notes, n.visible_to_players, id]
+    );
+    return this.findById(id);
+  },
+
+  async setStatus(id, status) {
+    const allowed = this.ALLOWED_STATUSES.includes(status) ? status : 'active';
+    await query('UPDATE quests SET status=$1, updated_at=CURRENT_TIMESTAMP WHERE id=$2', [allowed, id]);
+    return this.findById(id);
+  },
+
+  async toggleObjective(id, idx) {
+    const q = await this.findById(id);
+    if (!q) return null;
+    const objs = q.objectives.slice();
+    if (idx < 0 || idx >= objs.length) return q;
+    objs[idx] = { ...objs[idx], done: !objs[idx].done };
+    await query('UPDATE quests SET objectives=$1, updated_at=CURRENT_TIMESTAMP WHERE id=$2', [JSON.stringify(objs), id]);
+    return this.findById(id);
+  },
+
+  async delete(id) {
+    await query('DELETE FROM quests WHERE id = $1', [id]);
+  }
+};
+
+const handoutOps = {
+  _shape(row) {
+    if (!row) return null;
+    let recipients = [];
+    if (row.recipient_user_ids) {
+      try {
+        const parsed = typeof row.recipient_user_ids === 'string'
+          ? JSON.parse(row.recipient_user_ids)
+          : row.recipient_user_ids;
+        if (Array.isArray(parsed)) recipients = parsed.map(String);
+      } catch { recipients = []; }
+    }
+    return {
+      id: row.id,
+      campaign_id: row.campaign_id,
+      dm_id: row.dm_id,
+      title: row.title || 'Handout',
+      description: row.description || '',
+      file_url: row.file_url,
+      mime_type: row.mime_type || '',
+      file_size: parseInt(row.file_size, 10) || 0,
+      recipient_user_ids: recipients,
+      is_revealed: !!row.is_revealed,
+      created_at: row.created_at
+    };
+  },
+
+  // recipients: empty array means "all party"
+  async create(campaignId, dmId, data) {
+    const id = uuidv4();
+    const recipients = Array.isArray(data.recipient_user_ids)
+      ? data.recipient_user_ids.slice(0, 50).map(String)
+      : [];
+    await query(
+      `INSERT INTO handouts (id, campaign_id, dm_id, title, description, file_url, mime_type, file_size, recipient_user_ids, is_revealed)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        id, campaignId, dmId,
+        String(data.title || 'Handout').slice(0, 200),
+        String(data.description || '').slice(0, 4000),
+        String(data.file_url || ''),
+        String(data.mime_type || '').slice(0, 100),
+        parseInt(data.file_size, 10) || 0,
+        JSON.stringify(recipients),
+        data.is_revealed === false ? 0 : 1
+      ]
+    );
+    return this.findById(id);
+  },
+
+  async findById(id) {
+    const res = await query('SELECT * FROM handouts WHERE id = $1', [id]);
+    return this._shape(one(res));
+  },
+
+  async findByFileUrl(fileUrl) {
+    const res = await query('SELECT * FROM handouts WHERE file_url = $1', [fileUrl]);
+    return this._shape(one(res));
+  },
+
+  async listByCampaign(campaignId) {
+    const res = await query('SELECT * FROM handouts WHERE campaign_id = $1 ORDER BY created_at DESC', [campaignId]);
+    return res.rows.map((r) => this._shape(r));
+  },
+
+  // Visible to a particular user: all-party (empty recipients) OR explicitly listed.
+  async listForUser(campaignId, userId) {
+    const all = await this.listByCampaign(campaignId);
+    return all.filter((h) =>
+      h.is_revealed && (h.recipient_user_ids.length === 0 || h.recipient_user_ids.includes(String(userId)))
+    );
+  },
+
+  async update(id, data) {
+    const existing = await this.findById(id);
+    if (!existing) return null;
+    const recipients = Array.isArray(data.recipient_user_ids)
+      ? data.recipient_user_ids.slice(0, 50).map(String)
+      : existing.recipient_user_ids;
+    await query(
+      `UPDATE handouts SET title=$1, description=$2, recipient_user_ids=$3, is_revealed=$4 WHERE id=$5`,
+      [
+        String(data.title ?? existing.title).slice(0, 200),
+        String(data.description ?? existing.description).slice(0, 4000),
+        JSON.stringify(recipients),
+        data.is_revealed === undefined ? (existing.is_revealed ? 1 : 0) : (data.is_revealed ? 1 : 0),
+        id
+      ]
+    );
+    return this.findById(id);
+  },
+
+  async delete(id) {
+    await query('DELETE FROM handouts WHERE id = $1', [id]);
+  }
+};
+
+const worldStateOps = {
+  ALLOWED_CALENDARS: ['faerun', 'greyhawk', 'gregorian', 'custom'],
+  ALLOWED_WEATHER: ['clear', 'cloudy', 'overcast', 'rain', 'storm', 'thunderstorm', 'snow', 'blizzard', 'fog', 'heatwave', 'sandstorm'],
+  ALLOWED_WIND: ['calm', 'light', 'moderate', 'strong', 'gale'],
+  ALLOWED_TEMPERATURE: ['arctic', 'cold', 'temperate', 'warm', 'hot', 'scorching'],
+
+  _shape(row) {
+    if (!row) return null;
+    return {
+      campaign_id: row.campaign_id,
+      calendar_type: row.calendar_type || 'faerun',
+      year: parseInt(row.year, 10) || 1492,
+      month_index: parseInt(row.month_index, 10) || 0,
+      day: parseInt(row.day, 10) || 1,
+      hour: parseInt(row.hour, 10) || 8,
+      minute: parseInt(row.minute, 10) || 0,
+      weather: row.weather || 'clear',
+      wind: row.wind || 'calm',
+      temperature: row.temperature || 'temperate',
+      moon_phase: parseInt(row.moon_phase, 10) || 0,
+      auto_weather: !!row.auto_weather,
+      notes: row.notes || '',
+      updated_at: row.updated_at
+    };
+  },
+
+  async get(campaignId) {
+    const res = await query('SELECT * FROM campaign_world_state WHERE campaign_id = $1', [campaignId]);
+    if (res.rows.length) return this._shape(res.rows[0]);
+    // Auto-init with sensible defaults.
+    await query(
+      `INSERT INTO campaign_world_state (campaign_id) VALUES ($1)
+       ON CONFLICT (campaign_id) DO NOTHING`,
+      [campaignId]
+    );
+    const res2 = await query('SELECT * FROM campaign_world_state WHERE campaign_id = $1', [campaignId]);
+    return this._shape(res2.rows[0]);
+  },
+
+  async update(campaignId, data) {
+    await this.get(campaignId); // ensure row exists
+    const fields = {};
+    if (data.calendar_type !== undefined && this.ALLOWED_CALENDARS.includes(data.calendar_type)) fields.calendar_type = data.calendar_type;
+    if (data.year !== undefined) fields.year = parseInt(data.year, 10) || 0;
+    if (data.month_index !== undefined) fields.month_index = parseInt(data.month_index, 10) || 0;
+    if (data.day !== undefined) fields.day = Math.max(1, parseInt(data.day, 10) || 1);
+    if (data.hour !== undefined) {
+      const h = parseInt(data.hour, 10);
+      fields.hour = Math.min(23, Math.max(0, isNaN(h) ? 0 : h));
+    }
+    if (data.minute !== undefined) {
+      const m = parseInt(data.minute, 10);
+      fields.minute = Math.min(59, Math.max(0, isNaN(m) ? 0 : m));
+    }
+    if (data.weather !== undefined && this.ALLOWED_WEATHER.includes(data.weather)) fields.weather = data.weather;
+    if (data.wind !== undefined && this.ALLOWED_WIND.includes(data.wind)) fields.wind = data.wind;
+    if (data.temperature !== undefined && this.ALLOWED_TEMPERATURE.includes(data.temperature)) fields.temperature = data.temperature;
+    if (data.moon_phase !== undefined) fields.moon_phase = Math.min(7, Math.max(0, parseInt(data.moon_phase, 10) || 0));
+    if (data.auto_weather !== undefined) fields.auto_weather = data.auto_weather ? 1 : 0;
+    if (data.notes !== undefined) fields.notes = String(data.notes).slice(0, 4000);
+
+    const keys = Object.keys(fields);
+    if (!keys.length) return this.get(campaignId);
+    const setParts = keys.map((k, i) => `${k} = $${i + 1}`);
+    const values = keys.map((k) => fields[k]);
+    setParts.push('updated_at = CURRENT_TIMESTAMP');
+    values.push(campaignId);
+    await query(`UPDATE campaign_world_state SET ${setParts.join(', ')} WHERE campaign_id = $${values.length}`, values);
+    return this.get(campaignId);
+  }
+};
+
+const soundOps = {
+  ALLOWED_CATEGORIES: ['sfx', 'ambient'],
+
+  _shape(row) {
+    if (!row) return null;
+    let tags = [];
+    try { tags = typeof row.tags === 'string' ? JSON.parse(row.tags) : (row.tags || []); }
+    catch { tags = []; }
+    return {
+      id: row.id,
+      campaign_id: row.campaign_id,
+      dm_id: row.dm_id,
+      name: row.name,
+      category: row.category || 'sfx',
+      file_url: row.file_url,
+      mime_type: row.mime_type || '',
+      file_size: parseInt(row.file_size, 10) || 0,
+      icon: row.icon || '',
+      tags: Array.isArray(tags) ? tags : [],
+      default_volume: parseFloat(row.default_volume) || 0.7,
+      is_loop: !!row.is_loop,
+      source_type: row.source_type || 'upload',
+      youtube_id: row.youtube_id || '',
+      source_url: row.source_url || '',
+      created_at: row.created_at
+    };
+  },
+
+  async create(campaignId, dmId, data) {
+    const id = uuidv4();
+    const category = this.ALLOWED_CATEGORIES.includes(data.category) ? data.category : 'sfx';
+    const isLoop = data.is_loop === true || data.is_loop === 1 || category === 'ambient';
+    const vol = parseFloat(data.default_volume);
+    await query(
+      `INSERT INTO sound_effects (
+        id, campaign_id, dm_id, name, category, file_url, mime_type, file_size, icon, tags,
+        default_volume, is_loop, source_type, youtube_id, source_url
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+      [
+        id, campaignId, dmId,
+        String(data.name || 'Dźwięk').slice(0, 100),
+        category,
+        String(data.file_url || ''),
+        String(data.mime_type || '').slice(0, 100),
+        parseInt(data.file_size, 10) || 0,
+        String(data.icon || '').slice(0, 16),
+        JSON.stringify(Array.isArray(data.tags) ? data.tags.slice(0, 10).map(String) : []),
+        Math.min(1, Math.max(0, isNaN(vol) ? 0.7 : vol)),
+        isLoop ? 1 : 0,
+        data.source_type || 'upload',
+        data.youtube_id || '',
+        data.source_url || ''
+      ]
+    );
+    return this.findById(id);
+  },
+
+  async findByYoutubeId(campaignId, youtubeId) {
+    if (!youtubeId) return null;
+    const res = await query(
+      'SELECT * FROM sound_effects WHERE campaign_id = $1 AND youtube_id = $2 LIMIT 1',
+      [campaignId, youtubeId]
+    );
+    return this._shape(one(res));
+  },
+
+  async findById(id) {
+    const res = await query('SELECT * FROM sound_effects WHERE id = $1', [id]);
+    return this._shape(one(res));
+  },
+
+  async listByCampaign(campaignId, category = null) {
+    if (category) {
+      const res = await query('SELECT * FROM sound_effects WHERE campaign_id = $1 AND category = $2 ORDER BY name', [campaignId, category]);
+      return res.rows.map((r) => this._shape(r));
+    }
+    const res = await query('SELECT * FROM sound_effects WHERE campaign_id = $1 ORDER BY category, name', [campaignId]);
+    return res.rows.map((r) => this._shape(r));
+  },
+
+  async update(id, data) {
+    const existing = await this.findById(id);
+    if (!existing) return null;
+    const fields = {};
+    if (data.name !== undefined) fields.name = String(data.name).slice(0, 100);
+    if (data.icon !== undefined) fields.icon = String(data.icon).slice(0, 16);
+    if (data.category !== undefined && this.ALLOWED_CATEGORIES.includes(data.category)) fields.category = data.category;
+    if (data.tags !== undefined) fields.tags = JSON.stringify(Array.isArray(data.tags) ? data.tags.slice(0, 10).map(String) : []);
+    if (data.default_volume !== undefined) {
+      const v = parseFloat(data.default_volume);
+      fields.default_volume = Math.min(1, Math.max(0, isNaN(v) ? 0.7 : v));
+    }
+    if (data.is_loop !== undefined) fields.is_loop = data.is_loop ? 1 : 0;
+    const keys = Object.keys(fields);
+    if (!keys.length) return existing;
+    const setParts = keys.map((k, i) => `${k} = $${i + 1}`);
+    const values = keys.map((k) => fields[k]);
+    values.push(id);
+    await query(`UPDATE sound_effects SET ${setParts.join(', ')} WHERE id = $${values.length}`, values);
+    return this.findById(id);
+  },
+
+  async delete(id) {
+    await query('DELETE FROM sound_effects WHERE id = $1', [id]);
+  }
+};
+
 const lootGrantOps = {
   async listForCharacter(characterId, onlyPending = true) {
     const sql = onlyPending
@@ -2901,8 +3796,10 @@ const musicOps = {
   async create(campaignId, userId, data) {
     const id = uuidv4();
     await query(
-      `INSERT INTO campaign_music (id, campaign_id, title, file_url, file_size, mime_type, uploaded_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      `INSERT INTO campaign_music (
+        id, campaign_id, title, file_url, file_size, mime_type, uploaded_by,
+        source_type, youtube_id, source_url
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         id,
         campaignId,
@@ -2910,7 +3807,10 @@ const musicOps = {
         data.file_url,
         data.file_size || 0,
         data.mime_type || '',
-        userId
+        userId,
+        data.source_type || 'upload',
+        data.youtube_id || '',
+        data.source_url || ''
       ]
     );
     return this.findById(id);
@@ -2918,6 +3818,15 @@ const musicOps = {
 
   async findById(id) {
     const res = await query('SELECT * FROM campaign_music WHERE id = $1', [id]);
+    return one(res);
+  },
+
+  async findByYoutubeId(campaignId, youtubeId) {
+    if (!youtubeId) return null;
+    const res = await query(
+      'SELECT * FROM campaign_music WHERE campaign_id = $1 AND youtube_id = $2 LIMIT 1',
+      [campaignId, youtubeId]
+    );
     return one(res);
   },
 
@@ -2934,6 +3843,101 @@ const musicOps = {
     if (!track) return null;
     await query('DELETE FROM campaign_music WHERE id = $1', [id]);
     return track;
+  }
+};
+
+const musicPlaylistOps = {
+  _shape(row, trackIds = []) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      campaign_id: row.campaign_id,
+      name: row.name,
+      shuffle: !!row.shuffle,
+      auto_advance: row.auto_advance !== 0,
+      track_ids: trackIds,
+      created_at: row.created_at
+    };
+  },
+
+  async _loadTrackIds(playlistId) {
+    const res = await query(
+      'SELECT track_id FROM campaign_music_playlist_items WHERE playlist_id = $1 ORDER BY sort_order ASC, id ASC',
+      [playlistId]
+    );
+    return res.rows.map((r) => r.track_id);
+  },
+
+  async findById(id) {
+    const res = await query('SELECT * FROM campaign_music_playlists WHERE id = $1', [id]);
+    const row = one(res);
+    if (!row) return null;
+    const trackIds = await this._loadTrackIds(id);
+    return this._shape(row, trackIds);
+  },
+
+  async listByCampaign(campaignId) {
+    const res = await query(
+      'SELECT * FROM campaign_music_playlists WHERE campaign_id = $1 ORDER BY name ASC',
+      [campaignId]
+    );
+    const rows = res.rows;
+    const out = [];
+    for (const row of rows) {
+      const trackIds = await this._loadTrackIds(row.id);
+      out.push(this._shape(row, trackIds));
+    }
+    return out;
+  },
+
+  async create(campaignId, data) {
+    const id = uuidv4();
+    const name = String(data.name || 'Playlista').trim().slice(0, 80) || 'Playlista';
+    const shuffle = data.shuffle ? 1 : 0;
+    const autoAdvance = data.auto_advance === false ? 0 : 1;
+    await query(
+      `INSERT INTO campaign_music_playlists (id, campaign_id, name, shuffle, auto_advance)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [id, campaignId, name, shuffle, autoAdvance]
+    );
+    await this._replaceTracks(id, data.track_ids || data.trackIds || []);
+    return this.findById(id);
+  },
+
+  async update(id, data) {
+    const existing = await this.findById(id);
+    if (!existing) return null;
+    const fields = {};
+    if (data.name !== undefined) fields.name = String(data.name).trim().slice(0, 80) || existing.name;
+    if (data.shuffle !== undefined) fields.shuffle = data.shuffle ? 1 : 0;
+    if (data.auto_advance !== undefined) fields.auto_advance = data.auto_advance ? 1 : 0;
+    const keys = Object.keys(fields);
+    if (keys.length) {
+      const setParts = keys.map((k, i) => `${k} = $${i + 1}`);
+      const values = keys.map((k) => fields[k]);
+      values.push(id);
+      await query(`UPDATE campaign_music_playlists SET ${setParts.join(', ')} WHERE id = $${values.length}`, values);
+    }
+    if (data.track_ids !== undefined || data.trackIds !== undefined) {
+      await this._replaceTracks(id, data.track_ids || data.trackIds || []);
+    }
+    return this.findById(id);
+  },
+
+  async _replaceTracks(playlistId, trackIds) {
+    await query('DELETE FROM campaign_music_playlist_items WHERE playlist_id = $1', [playlistId]);
+    const ids = Array.isArray(trackIds) ? trackIds.map(String).slice(0, 200) : [];
+    for (let i = 0; i < ids.length; i++) {
+      await query(
+        `INSERT INTO campaign_music_playlist_items (id, playlist_id, track_id, sort_order)
+         VALUES ($1, $2, $3, $4)`,
+        [uuidv4(), playlistId, ids[i], i]
+      );
+    }
+  },
+
+  async delete(id) {
+    await query('DELETE FROM campaign_music_playlists WHERE id = $1', [id]);
   }
 };
 
@@ -3056,7 +4060,97 @@ const mapPresetOps = {
   }
 };
 
+// Collects every row tied to a campaign for a full backup snapshot.
+async function collectCampaignSnapshot(campaignId) {
+  const t = (sql, params = []) => query(sql, params).then((r) => r.rows);
+  const [
+    campaignRow, members, characters, messages, npcs, initiative, notes,
+    mapTokens, mapSettings, encounters, diceLog, mapPins, merchants, lootTables,
+    tokenImages, customItems, customMonsters, lootGrants, music, mapPresets,
+    quests, handouts, worldState
+  ] = await Promise.all([
+    t('SELECT * FROM campaigns WHERE id = $1', [campaignId]).then((r) => r[0]),
+    t(`SELECT cm.role, cm.joined_at, u.id as user_id, u.username, u.display_name, u.avatar_url
+       FROM campaign_members cm JOIN users u ON cm.user_id = u.id WHERE cm.campaign_id = $1`, [campaignId]),
+    t('SELECT * FROM characters WHERE campaign_id = $1', [campaignId]),
+    t('SELECT * FROM messages WHERE campaign_id = $1 ORDER BY created_at ASC', [campaignId]),
+    t('SELECT * FROM npcs WHERE campaign_id = $1', [campaignId]),
+    t('SELECT * FROM initiative_entries WHERE campaign_id = $1 ORDER BY initiative_roll DESC, sort_order ASC', [campaignId]),
+    t('SELECT * FROM session_notes WHERE campaign_id = $1', [campaignId]),
+    t('SELECT * FROM map_tokens WHERE campaign_id = $1', [campaignId]),
+    t('SELECT * FROM map_settings WHERE campaign_id = $1', [campaignId]).then((r) => r[0] || null),
+    t('SELECT * FROM encounters WHERE campaign_id = $1', [campaignId]),
+    t('SELECT * FROM dice_log WHERE campaign_id = $1 ORDER BY created_at ASC', [campaignId]),
+    t('SELECT * FROM map_pins WHERE campaign_id = $1', [campaignId]).catch(() => []),
+    t('SELECT * FROM merchants WHERE campaign_id = $1', [campaignId]).catch(() => []),
+    t('SELECT * FROM loot_tables WHERE campaign_id = $1', [campaignId]).catch(() => []),
+    t('SELECT * FROM token_images WHERE campaign_id = $1', [campaignId]).catch(() => []),
+    t('SELECT * FROM custom_items WHERE campaign_id = $1', [campaignId]).catch(() => []),
+    t('SELECT * FROM custom_monsters WHERE campaign_id = $1', [campaignId]).catch(() => []),
+    t('SELECT * FROM loot_grants WHERE campaign_id = $1', [campaignId]).catch(() => []),
+    t('SELECT * FROM campaign_music WHERE campaign_id = $1', [campaignId]).catch(() => []),
+    t('SELECT * FROM map_presets WHERE campaign_id = $1', [campaignId]).catch(() => []),
+    t('SELECT * FROM quests WHERE campaign_id = $1', [campaignId]).catch(() => []),
+    t('SELECT * FROM handouts WHERE campaign_id = $1', [campaignId]).catch(() => []),
+    t('SELECT * FROM campaign_world_state WHERE campaign_id = $1', [campaignId]).catch(() => []).then((r) => r[0] || null)
+  ]);
+  const soundEffects = await t('SELECT * FROM sound_effects WHERE campaign_id = $1', [campaignId]).catch(() => []);
+
+  // Collect all upload paths referenced by exported rows.
+  const referencedFiles = new Set();
+  const addPath = (p) => { if (typeof p === 'string' && p.startsWith('/')) referencedFiles.add(p); };
+  if (mapSettings?.background_image) addPath(mapSettings.background_image);
+  for (const c of characters) { addPath(c.avatar_url); addPath(c.portrait_url); }
+  for (const n of npcs) { addPath(n.avatar_url); }
+  for (const t of mapTokens) { addPath(t.image_url); }
+  for (const ti of tokenImages) { addPath(ti.image_url); }
+  for (const m of music) { addPath(m.file_url); }
+  for (const h of handouts) { addPath(h.file_url); }
+  for (const s of soundEffects) { addPath(s.file_url); }
+  for (const p of mapPresets) {
+    try {
+      const data = typeof p.preset_data === 'string' ? JSON.parse(p.preset_data) : p.preset_data;
+      if (data?.settings?.background_image) addPath(data.settings.background_image);
+    } catch { /* ignore parse errors */ }
+  }
+
+  return {
+    meta: {
+      app: 'Roll 1 (Dedeki) — campaign backup',
+      schema_version: 1,
+      exported_at: new Date().toISOString(),
+      campaign_id: campaignId
+    },
+    campaign: campaignRow,
+    members,
+    characters,
+    messages,
+    npcs,
+    initiative,
+    notes,
+    map_tokens: mapTokens,
+    map_settings: mapSettings,
+    encounters,
+    dice_log: diceLog,
+    map_pins: mapPins,
+    merchants,
+    loot_tables: lootTables,
+    token_images: tokenImages,
+    custom_items: customItems,
+    custom_monsters: customMonsters,
+    loot_grants: lootGrants,
+    music,
+    map_presets: mapPresets,
+    quests,
+    handouts,
+    world_state: worldState,
+    sound_effects: soundEffects,
+    referenced_files: Array.from(referencedFiles)
+  };
+}
+
 module.exports = {
+  pool,
   initializeDatabase,
   saveDb,
   userOps,
@@ -3073,10 +4167,17 @@ module.exports = {
   merchantOps,
   lootTableOps,
   customItemOps,
+  customMonsterOps,
+  questOps,
+  handoutOps,
+  worldStateOps,
+  soundOps,
   tokenImageOps,
   lootGrantOps,
   economyOps,
   musicOps,
+  musicPlaylistOps,
   resolveEntityStats,
-  mapPresetOps
+  mapPresetOps,
+  collectCampaignSnapshot
 };

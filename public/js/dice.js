@@ -986,7 +986,7 @@ const Dice = {
     const sides = this.parseDieSidesFromRoll(damageExpr, rolls)[0];
     const result = this._emitRoll(char, expr, rolls, total, label, sides, isSecret);
     if (mapContext?.targetTokenId && typeof MapCombat !== 'undefined') {
-      MapCombat.applyDamageToTarget(mapContext.targetTokenId, total);
+      MapCombat.applyDamageToTarget(mapContext.targetTokenId, total, mapContext.attackerTokenId);
     }
     return result;
   },

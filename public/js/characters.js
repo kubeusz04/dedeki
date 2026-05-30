@@ -30,6 +30,9 @@ const Characters = {
       if (typeof Initiative !== 'undefined' && Initiative.entries?.length) Initiative.render();
       if (typeof PlayerHud !== 'undefined') PlayerHud.render();
       if (typeof Chat !== 'undefined') Chat.renderCombatants();
+      if (App.currentCampaign?.role === 'dm' && typeof DMPanel !== 'undefined') {
+        DMPanel.loadPartyOverview();
+      }
     } catch (err) {
       showToast('Błąd ładowania postaci: ' + err.message, 'error');
     }
@@ -655,6 +658,8 @@ const Characters = {
           </div>` : ''}
         </div>
 
+        ${this.renderClassResourcesSection(c, canEdit)}
+
         ${this.renderSpellsSection(c, canEdit)}
 
         <!-- Personality & Backstory -->
@@ -687,6 +692,8 @@ const Characters = {
             <button type="button" class="btn btn-sm btn-primary" onclick="Characters.addConditionFromSelect('${c.id}')">Dodaj</button>
           </div>` : ''}
         </div>
+
+        ${this.renderInspirationSection(c, canEdit)}
 
         <!-- Roll templates -->
         <div class="sheet-section">
@@ -848,9 +855,12 @@ const Characters = {
     const atk = c.spell_attack_bonus ?? DndSpells.getSpellAttackBonus(c);
 
     if (!hasCasting && maxSpellLvl === 0) {
-      return `<div class="sheet-section sheet-spells-section">
+      return `<div class="sheet-section sheet-spells-section" id="sheet-spells-root" data-character-id="${escapeHtml(c.id)}">
         <h3>🔮 Czary</h3>
         <p class="sheet-empty">Klasa ${escapeHtml(c.char_class)} nie rzuca standardowych czarów (wyjątek: podklasa).</p>
+        <div class="spell-rest-buttons">
+          <button type="button" class="btn btn-sm btn-secondary" data-spellbook-open title="Pełny katalog czarów 5e z filtrami">📖 Spellbook (katalog)</button>
+        </div>
       </div>`;
     }
 
@@ -923,9 +933,13 @@ const Characters = {
 
     const restButtons = canEdit
       ? `<div class="spell-rest-buttons">
+          <button type="button" class="btn btn-sm btn-secondary" data-spellbook-open title="Pełny katalog czarów z filtrami i opcją 'Przygotowane dziś'">📖 Spellbook</button>
           <button type="button" class="btn btn-sm btn-secondary" data-rest="short" title="Krótki odpoczynek (1h) — Warlock odzyskuje sloty">🛌 Krótki odp.</button>
           <button type="button" class="btn btn-sm btn-primary" data-rest="long" title="Długi odpoczynek (8h) — pełne HP i sloty">😴 Długi odp.</button>
-        </div>` : '';
+        </div>`
+      : `<div class="spell-rest-buttons">
+          <button type="button" class="btn btn-sm btn-secondary" data-spellbook-open title="Spellbook (read-only)">📖 Spellbook</button>
+        </div>`;
 
     return `<div class="sheet-section sheet-spells-section" id="sheet-spells-root" data-character-id="${escapeHtml(c.id)}">
       <h3>🔮 Czary</h3>
@@ -1005,6 +1019,11 @@ const Characters = {
     root.querySelectorAll('.spell-template-btn').forEach((btn) => {
       btn.addEventListener('click', () => this.addSpellFromTemplate(c.id, btn.dataset.spellTemplate));
     });
+    root.querySelectorAll('[data-spellbook-open]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (typeof Spellbook !== 'undefined') Spellbook.openForCharacter(c.id);
+      });
+    });
     root.querySelectorAll('[data-spell-roll]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const spell = this.getSpellById(c, btn.dataset.spellId);
@@ -1061,9 +1080,317 @@ const Characters = {
     } catch (_e) { return false; }
   },
 
+  // ===== Inspiration (5e) =====
+  renderInspirationSection(c, canEdit) {
+    const insp = parseInt(c.inspiration, 10) || 0;
+    const armed = (typeof Inspiration !== 'undefined') && Inspiration.isArmedFor(c.id);
+    const isDm = App.currentCampaign?.role === 'dm';
+    const stars = insp > 0
+      ? '⭐'.repeat(Math.min(insp, 8)) + (insp > 8 ? ` ×${insp}` : '')
+      : '<span style="opacity:0.5;">— brak —</span>';
+    return `<div class="sheet-section sheet-inspiration ${armed ? 'is-armed' : ''}" id="sheet-inspiration-root" data-character-id="${escapeHtml(c.id)}">
+      <h3>⭐ Inspiracja
+        <small class="sheet-hint" style="font-weight:400;">— wydaj 1 by uzyskać przewagę na dowolnym rzucie d20</small>
+      </h3>
+      <div class="inspiration-display">
+        <div class="inspiration-count" title="Aktualna liczba inspiracji">${stars}</div>
+        <div class="inspiration-actions">
+          ${canEdit && insp > 0 ? `
+            <button type="button" class="btn btn-sm ${armed ? 'btn-warning' : 'btn-primary'}" data-insp-action="${armed ? 'disarm' : 'arm'}">
+              ${armed ? '✕ Anuluj uzbrojenie' : '⚡ Użyj na następny rzut'}
+            </button>` : ''}
+          ${isDm ? `
+            <button type="button" class="btn btn-sm btn-secondary" data-insp-action="dm-add" title="Daj +1 (MG)">+1</button>
+            <button type="button" class="btn btn-sm btn-secondary" data-insp-action="dm-sub" ${insp <= 0 ? 'disabled' : ''} title="Odejmij 1 (MG)">−1</button>
+            <button type="button" class="btn btn-sm btn-secondary" data-insp-action="dm-set" title="Ustaw dokładną wartość (MG)">⚙ Ustaw</button>` : ''}
+        </div>
+      </div>
+    </div>`;
+  },
+
+  bindInspirationSection(c, canEdit) {
+    const root = document.getElementById('sheet-inspiration-root');
+    if (!root) return;
+    root.querySelectorAll('[data-insp-action]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.inspAction;
+        if (typeof Inspiration === 'undefined') return;
+        if (action === 'arm') Inspiration.arm(c);
+        else if (action === 'disarm') Inspiration.disarm();
+        else if (action === 'dm-add') Inspiration.grantOne(c.id);
+        else if (action === 'dm-sub') Inspiration.removeOne(c.id);
+        else if (action === 'dm-set') {
+          const v = prompt(`Ustaw Inspirację dla ${c.name}:`, String(c.inspiration || 0));
+          if (v !== null) Inspiration.setExact(c.id, parseInt(v, 10) || 0);
+        }
+      });
+    });
+  },
+
+  // ===== Class Resources (Rage, Ki, Bardic Inspiration, ...) =====
+  parseClassResources(c) {
+    if (typeof ClassResources === 'undefined') return [];
+    return ClassResources.parse(c?.class_resources);
+  },
+
+  renderClassResourcesSection(c, canEdit) {
+    if (typeof ClassResources === 'undefined') return '';
+    const resources = this.parseClassResources(c);
+    const klass = String(c.char_class || '').trim();
+    const hasTpl = ClassResources.TEMPLATES[klass] && ClassResources.TEMPLATES[klass].length > 0;
+    const isEmpty = resources.length === 0;
+    const headerActions = canEdit ? `
+      <div class="class-res-actions">
+        ${hasTpl ? `<button type="button" class="btn btn-xs btn-secondary" data-class-res="auto" title="Wypełnij wg klasy i poziomu">✨ Auto wg klasy</button>` : ''}
+        <button type="button" class="btn btn-xs btn-primary" data-class-res="add">➕ Dodaj zasób</button>
+        ${resources.length ? `<button type="button" class="btn btn-xs btn-secondary" data-class-res="reset-all" title="Przywróć wszystkie do max">🔄 Pełne</button>` : ''}
+      </div>` : '';
+    const body = isEmpty
+      ? `<p class="sheet-hint">${canEdit ? (hasTpl ? `Brak zasobów. Kliknij <strong>✨ Auto wg klasy</strong>, aby dodać domyślne dla klasy <em>${escapeHtml(klass || '—')}</em>, albo <strong>➕ Dodaj zasób</strong>, aby zdefiniować własny.` : 'Brak zasobów dla tej klasy. Możesz dodać własny.') : 'Brak zasobów klasowych.'}</p>`
+      : `<div class="class-res-list">${resources.map((r) => this.renderClassResource(r, canEdit)).join('')}</div>`;
+    return `<div class="sheet-section sheet-class-resources" id="sheet-class-res-root" data-character-id="${escapeHtml(c.id)}">
+      <h3>🎯 Zasoby klasowe ${headerActions}</h3>
+      ${body}
+    </div>`;
+  },
+
+  renderClassResource(r, canEdit) {
+    const max = parseInt(r.max, 10) || 0;
+    const cur = Math.max(0, Math.min(max, parseInt(r.current, 10) || 0));
+    const recoveryLabel = ClassResources.recoveryLabel(r.recoversOn);
+    const useDots = max > 0 && max <= 12;
+    let trackerHtml = '';
+    if (useDots) {
+      const dots = Array.from({ length: max }, (_, i) =>
+        `<button type="button" class="res-dot ${i < cur ? 'is-full' : 'is-used'}" ${canEdit ? `data-res-toggle="${escapeHtml(r.id)}" data-res-idx="${i}"` : 'disabled'} title="Użyj/przywróć"></button>`
+      ).join('');
+      trackerHtml = `<div class="res-dots">${dots}</div>`;
+    } else if (max > 0) {
+      const pct = Math.round((cur / max) * 100);
+      trackerHtml = `<div class="res-bar"><div class="res-bar-fill" style="width:${pct}%"></div><span class="res-bar-label">${cur} / ${max}</span></div>`;
+    } else {
+      trackerHtml = `<div class="res-bar"><span class="res-bar-label">${cur}</span></div>`;
+    }
+    const editButtons = canEdit ? `
+      <div class="res-controls">
+        <button type="button" class="btn btn-xs btn-secondary" data-res-step="-1" data-res-id="${escapeHtml(r.id)}" title="-1">−</button>
+        <button type="button" class="btn btn-xs btn-secondary" data-res-step="1" data-res-id="${escapeHtml(r.id)}" title="+1">+</button>
+        <button type="button" class="btn btn-xs btn-secondary" data-res-reset="${escapeHtml(r.id)}" title="Pełne">⤴</button>
+        <button type="button" class="btn btn-xs btn-secondary" data-res-edit="${escapeHtml(r.id)}" title="Edytuj">✏️</button>
+        <button type="button" class="btn btn-xs btn-danger" data-res-remove="${escapeHtml(r.id)}" title="Usuń">✕</button>
+      </div>` : '';
+    return `<div class="class-res-row" data-res-id="${escapeHtml(r.id)}">
+      <div class="class-res-head">
+        <span class="class-res-name"><span class="class-res-emoji">${escapeHtml(r.emoji || '🎯')}</span> ${escapeHtml(r.name)}</span>
+        <span class="class-res-meta" title="Odnowienie">↻ ${escapeHtml(recoveryLabel)}</span>
+      </div>
+      ${trackerHtml}
+      ${editButtons}
+    </div>`;
+  },
+
+  bindClassResourcesActions(c, canEdit) {
+    const root = document.getElementById('sheet-class-res-root');
+    if (!root) return;
+    const onClick = (sel, fn) => root.querySelectorAll(sel).forEach((el) => el.addEventListener('click', () => fn(el)));
+
+    if (canEdit) {
+      onClick('[data-class-res="auto"]', () => this.autoFillClassResources(c.id));
+      onClick('[data-class-res="add"]', () => this.openClassResourceEditor(c.id, null));
+      onClick('[data-class-res="reset-all"]', () => this.resetAllClassResources(c.id));
+      onClick('[data-res-toggle]', (btn) => this.toggleClassResourceDot(c.id, btn.dataset.resToggle, parseInt(btn.dataset.resIdx, 10)));
+      onClick('[data-res-step]', (btn) => this.stepClassResource(c.id, btn.dataset.resId, parseInt(btn.dataset.resStep, 10)));
+      onClick('[data-res-reset]', (btn) => this.resetClassResource(c.id, btn.dataset.resReset));
+      onClick('[data-res-edit]', (btn) => this.openClassResourceEditor(c.id, btn.dataset.resEdit));
+      onClick('[data-res-remove]', (btn) => this.removeClassResource(c.id, btn.dataset.resRemove));
+    }
+  },
+
+  async _saveResources(charId, resources) {
+    App.socket?.emit('character-set-resources', { characterId: charId, resources });
+    // optymistyczna lokalna mutacja: odśwież arkusz po krótkim czasie
+    setTimeout(() => {
+      // odśwież lokalnie z DB tylko jeśli arkusz jest otwarty
+      const open = document.querySelector(`#sheet-class-res-root[data-character-id="${charId}"]`);
+      if (open) this.openSheet(charId);
+    }, 200);
+  },
+
+  async _getResources(charId) {
+    const c = await apiFetch(`/characters/${charId}`);
+    return { c, list: this.parseClassResources(c) };
+  },
+
+  async toggleClassResourceDot(charId, resId, idx) {
+    const { list } = await this._getResources(charId);
+    const r = list.find((x) => x.id === resId);
+    if (!r) return;
+    // dot na pozycji idx jest "pełny" gdy idx < r.current; klik przełącza
+    if (idx < r.current) r.current = idx;
+    else r.current = Math.min(r.max, idx + 1);
+    await this._saveResources(charId, list);
+  },
+
+  async stepClassResource(charId, resId, delta) {
+    const { list } = await this._getResources(charId);
+    const r = list.find((x) => x.id === resId);
+    if (!r) return;
+    r.current = Math.max(0, Math.min(r.max, (parseInt(r.current, 10) || 0) + delta));
+    await this._saveResources(charId, list);
+  },
+
+  async resetClassResource(charId, resId) {
+    const { list } = await this._getResources(charId);
+    const r = list.find((x) => x.id === resId);
+    if (!r) return;
+    r.current = parseInt(r.max, 10) || 0;
+    await this._saveResources(charId, list);
+  },
+
+  async resetAllClassResources(charId) {
+    const { list } = await this._getResources(charId);
+    list.forEach((r) => { r.current = parseInt(r.max, 10) || 0; });
+    await this._saveResources(charId, list);
+    showToast('Zasoby przywrócone do max', 'success');
+  },
+
+  async removeClassResource(charId, resId) {
+    if (!confirm('Usunąć ten zasób?')) return;
+    const { list } = await this._getResources(charId);
+    const next = list.filter((r) => r.id !== resId);
+    await this._saveResources(charId, next);
+  },
+
+  async autoFillClassResources(charId) {
+    if (typeof ClassResources === 'undefined') return;
+    const { c, list } = await this._getResources(charId);
+    const generated = ClassResources.generateForCharacter(c);
+    if (!generated.length) {
+      showToast('Brak domyślnych zasobów dla tej klasy/poziomu', 'warning');
+      return;
+    }
+    // dopisz tylko te, których jeszcze nie ma (po nazwie)
+    const haveNames = new Set(list.map((r) => r.name.toLowerCase()));
+    const additions = generated.filter((g) => !haveNames.has(String(g.name).toLowerCase()));
+    if (!additions.length) {
+      showToast('Wszystkie domyślne zasoby już są dodane', 'info');
+      return;
+    }
+    const merged = list.concat(additions);
+    await this._saveResources(charId, merged);
+    showToast(`Dodano ${additions.length} zasobów`, 'success');
+  },
+
+  openClassResourceEditor(charId, resId) {
+    const isEdit = !!resId;
+    let existing = null;
+    if (isEdit) {
+      const root = document.getElementById('sheet-class-res-root');
+      if (root) {
+        // Bierzemy postać ze sheetCharacter — najświeższa lokalna kopia
+        const list = this.parseClassResources(this.sheetCharacter || {});
+        existing = list.find((r) => r.id === resId);
+      }
+    }
+    const r = existing || { name: '', emoji: '🎯', max: 1, current: 1, recoversOn: 'long' };
+    const modalHtml = `
+      <div class="modal-overlay" id="class-res-editor-overlay">
+        <div class="modal class-res-editor">
+          <div class="modal-header">
+            <h3>${isEdit ? 'Edytuj zasób' : 'Nowy zasób klasowy'}</h3>
+            <button type="button" class="modal-close" data-action="close">✕</button>
+          </div>
+          <div class="modal-body">
+            <div class="form-row">
+              <div class="form-group" style="flex:0 0 90px;">
+                <label>Emoji</label>
+                <input type="text" id="cre-emoji" maxlength="4" value="${escapeHtml(r.emoji)}">
+              </div>
+              <div class="form-group" style="flex:1;">
+                <label>Nazwa</label>
+                <input type="text" id="cre-name" maxlength="60" value="${escapeHtml(r.name)}" placeholder="np. Szały, Punkty Ki">
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Maks.</label>
+                <input type="number" id="cre-max" min="0" max="999" value="${parseInt(r.max, 10) || 0}">
+              </div>
+              <div class="form-group">
+                <label>Aktualnie</label>
+                <input type="number" id="cre-cur" min="0" max="999" value="${parseInt(r.current, 10) || 0}">
+              </div>
+              <div class="form-group">
+                <label>Odnowienie</label>
+                <select id="cre-recover">
+                  <option value="long" ${r.recoversOn === 'long' ? 'selected' : ''}>Długi odpoczynek</option>
+                  <option value="short" ${r.recoversOn === 'short' ? 'selected' : ''}>Krótki odpoczynek</option>
+                  <option value="none" ${r.recoversOn === 'none' ? 'selected' : ''}>Manualnie / nigdy</option>
+                </select>
+              </div>
+            </div>
+            ${typeof ClassResources !== 'undefined' && ClassResources.GENERIC?.length ? `
+              <div class="form-group">
+                <label>Lub wybierz szablon</label>
+                <div class="cre-presets">
+                  ${ClassResources.GENERIC.map((g) => `<button type="button" class="btn btn-xs btn-secondary" data-cre-preset='${escapeHtml(JSON.stringify(g))}'>${escapeHtml(g.emoji)} ${escapeHtml(g.name)}</button>`).join('')}
+                </div>
+              </div>` : ''}
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-action="close">Anuluj</button>
+            <button type="button" class="btn btn-primary" id="cre-save">${isEdit ? 'Zapisz' : 'Dodaj'}</button>
+          </div>
+        </div>
+      </div>`;
+    const wrap = document.createElement('div');
+    wrap.innerHTML = modalHtml;
+    const overlay = wrap.firstElementChild;
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.remove();
+    overlay.querySelectorAll('[data-action="close"]').forEach((b) => b.addEventListener('click', close));
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+    overlay.querySelectorAll('[data-cre-preset]').forEach((b) => b.addEventListener('click', () => {
+      try {
+        const preset = JSON.parse(b.dataset.crePreset);
+        overlay.querySelector('#cre-emoji').value = preset.emoji || '🎯';
+        overlay.querySelector('#cre-name').value = preset.name || '';
+        overlay.querySelector('#cre-max').value = parseInt(preset.max, 10) || 1;
+        overlay.querySelector('#cre-cur').value = parseInt(preset.max, 10) || 1;
+        overlay.querySelector('#cre-recover').value = preset.recoversOn || 'long';
+      } catch (_e) {}
+    }));
+
+    overlay.querySelector('#cre-save').addEventListener('click', async () => {
+      const emoji = overlay.querySelector('#cre-emoji').value.trim() || '🎯';
+      const name = overlay.querySelector('#cre-name').value.trim();
+      const max = Math.max(0, parseInt(overlay.querySelector('#cre-max').value, 10) || 0);
+      const cur = Math.max(0, Math.min(max, parseInt(overlay.querySelector('#cre-cur').value, 10) || 0));
+      const recoversOn = overlay.querySelector('#cre-recover').value;
+      if (!name) { showToast('Podaj nazwę zasobu', 'error'); return; }
+      const { list } = await this._getResources(charId);
+      if (isEdit) {
+        const idx = list.findIndex((x) => x.id === resId);
+        if (idx >= 0) list[idx] = { ...list[idx], emoji, name, max, current: cur, recoversOn };
+      } else {
+        list.push({
+          id: `res-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+          emoji, name, max, current: cur, recoversOn
+        });
+      }
+      await this._saveResources(charId, list);
+      close();
+      showToast(isEdit ? 'Zasób zaktualizowany' : 'Zasób dodany', 'success');
+    });
+  },
+
   refreshOpenSheetIfMatches(charId) {
     if (!charId) return;
-    const open = document.querySelector(`#sheet-spells-root[data-character-id="${charId}"]`);
+    const open = document.querySelector(`#sheet-spells-root[data-character-id="${charId}"]`)
+      || document.querySelector(`#sheet-class-res-root[data-character-id="${charId}"]`)
+      || document.querySelector(`#sheet-inspiration-root[data-character-id="${charId}"]`);
     if (open) this.openSheet(charId);
   },
 
@@ -1424,6 +1751,8 @@ const Characters = {
     this._sheetCharId = c.id;
     if (typeof Economy !== 'undefined') Economy.bindInventoryActions(c, canEdit);
     this.bindSpellSheetActions(c, canEdit);
+    this.bindClassResourcesActions(c, canEdit);
+    this.bindInspirationSection(c, canEdit);
   },
 
   async onSheetClick(e) {

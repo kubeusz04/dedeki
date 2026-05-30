@@ -4,11 +4,43 @@ const DMEconomy = {
   lootTables: [],
   customItems: [],
 
-  init() {
-    document.getElementById('btn-dm-economy')?.addEventListener('click', () => this.showHub());
-    document.getElementById('btn-dm-merchant-quick')?.addEventListener('click', () => this.showCreateMerchant());
-    document.getElementById('btn-dm-loot-quick')?.addEventListener('click', () => this.showSendLoot());
-    document.getElementById('btn-dm-custom-item-quick')?.addEventListener('click', () => this.showCreateCustomItem());
+  init() {},
+
+  isDm() {
+    return App.currentCampaign?.role === 'dm';
+  },
+
+  openTab() {
+    document.querySelector('.session-tab[data-panel="dm-economy-panel"]')?.click();
+  },
+
+  open() {
+    if (!App.currentCampaign) return;
+    if (!this.isDm()) {
+      showToast('Ekonomia i handel są dostępne tylko dla MG', 'warning');
+      return;
+    }
+    this.openTab();
+  },
+
+  async onPanelActivate() {
+    if (!App.currentCampaign || !this.isDm()) return;
+    await this.load();
+    this._renderPanel();
+  },
+
+  _getMount() {
+    return document.getElementById('dm-economy-panel-root');
+  },
+
+  _isPanelMounted() {
+    return !!document.getElementById('dm-economy-hub-body');
+  },
+
+  _charOptionsHtml() {
+    return Characters.campaignCharacters?.map((c) =>
+      `<option value="${c.id}">${escapeHtml(c.name)}</option>`
+    ).join('') || '';
   },
 
   async load() {
@@ -26,22 +58,134 @@ const DMEconomy = {
         ]);
         this.merchants = merchants;
         this.lootTables = lootTables;
-        this.renderSidebar();
+        this._refreshPanel();
       }
     } catch (err) {
       console.error('DMEconomy load', err);
     }
   },
 
-  renderSidebar() {
+  _renderSummary() {
     const el = document.getElementById('dm-economy-summary');
     if (!el) return;
     const open = this.merchants.filter((m) => m.is_open).length;
     el.innerHTML = `
-      <p>Handlarze: <strong>${this.merchants.length}</strong> (otwartych: ${open})</p>
-      <p>Tabele łupu: <strong>${this.lootTables.length}</strong></p>
-      <p>Własne przedmioty: <strong>${this.customItems.length}</strong></p>
+      <div class="treasury-stat"><span class="treasury-stat__icon">🏪</span><span>Handlarze <strong>${this.merchants.length}</strong> <em>(otwartych: ${open})</em></span></div>
+      <div class="treasury-stat"><span class="treasury-stat__icon">📦</span><span>Tabele łupu <strong>${this.lootTables.length}</strong></span></div>
+      <div class="treasury-stat"><span class="treasury-stat__icon">🛠️</span><span>Własne przedmioty <strong>${this.customItems.length}</strong></span></div>
     `;
+  },
+
+  _refreshPanel() {
+    if (!this._isPanelMounted()) return;
+    this._renderSummary();
+    const body = document.getElementById('dm-economy-hub-body');
+    if (!body) return;
+    body.innerHTML = this._renderHubHtml();
+    this._bindListEvents();
+  },
+
+  _renderPanel() {
+    const mount = this._getMount();
+    if (!mount) return;
+    if (this._isPanelMounted()) {
+      this._refreshPanel();
+      return;
+    }
+    mount.innerHTML = `
+      <div class="treasury-chamber treasury-chamber--panel" role="region" aria-label="Ekonomia i handel">
+        <div class="treasury-chamber__coins" aria-hidden="true"></div>
+        <header class="treasury-chamber__head">
+          <span class="treasury-chamber__seal" aria-hidden="true">💰</span>
+          <div>
+            <h2 class="treasury-chamber__title">Księga Skarbu</h2>
+            <p class="treasury-chamber__sub">Ekonomia i handel kampanii</p>
+          </div>
+        </header>
+        <div id="dm-economy-summary" class="treasury-stats"></div>
+        <div class="treasury-chamber__scroll">
+          <div id="dm-economy-hub-body" class="dm-economy-hub"></div>
+        </div>
+      </div>`;
+    this._bindPanelEvents();
+    this._refreshPanel();
+  },
+
+  _renderHubHtml() {
+    return `
+      <div class="dm-economy-actions treasury-actions">
+        <button type="button" class="btn btn-sm btn-primary" id="dm-eco-new-merchant">➕ Nowy handlarz</button>
+        <button type="button" class="btn btn-sm btn-secondary" id="dm-eco-new-loot-table">📦 Tabela łupu</button>
+        <button type="button" class="btn btn-sm btn-success" id="dm-eco-new-item">🛠️ Własny przedmiot</button>
+        <button type="button" class="btn btn-sm btn-secondary" id="dm-eco-grant-coins">🪙 Przyznaj monety</button>
+        <button type="button" class="btn btn-sm btn-warning" id="dm-eco-send-loot">🎁 Wyślij łup</button>
+      </div>
+      <section class="treasury-section">
+        <h4 class="treasury-section__title">🏪 Handlarze</h4>
+        <div class="dm-merchant-list">${this.renderMerchantList()}</div>
+      </section>
+      <section class="treasury-section">
+        <h4 class="treasury-section__title">📦 Tabele łupu</h4>
+        <div class="dm-loot-table-list">${this.renderLootTableList()}</div>
+      </section>
+      <section class="treasury-section">
+        <h4 class="treasury-section__title">🛠️ Własne przedmioty</h4>
+        <div class="dm-custom-item-list">${this.renderCustomItemList()}</div>
+      </section>`;
+  },
+
+  _bindPanelEvents() {
+    const mount = this._getMount();
+    if (!mount || mount.dataset.bound === '1') return;
+    mount.dataset.bound = '1';
+    mount.addEventListener('click', (e) => {
+      if (e.target.closest('#dm-eco-new-merchant')) { this.showCreateMerchant(); return; }
+      if (e.target.closest('#dm-eco-new-loot-table')) { this.showCreateLootTable(); return; }
+      if (e.target.closest('#dm-eco-new-item')) { this.showCreateCustomItem(); return; }
+      if (e.target.closest('#dm-eco-grant-coins')) { this.showGrantCoins(this._charOptionsHtml()); return; }
+      if (e.target.closest('#dm-eco-send-loot')) { this.showSendLoot(this._charOptionsHtml()); return; }
+    });
+  },
+
+  _bindListEvents() {
+    const body = document.getElementById('dm-economy-hub-body');
+    if (!body || body.dataset.listBound === '1') return;
+    body.dataset.listBound = '1';
+    body.addEventListener('click', async (e) => {
+      const openBtn = e.target.closest('.dm-merchant-open');
+      if (openBtn) {
+        App.socket?.emit('merchant-open', { merchantId: openBtn.dataset.id });
+        showToast('Handlarz ogłoszony na czacie', 'success');
+        await this.load();
+        return;
+      }
+      const editM = e.target.closest('.dm-merchant-edit');
+      if (editM) { this.showEditMerchant(editM.dataset.id); return; }
+      const delM = e.target.closest('.dm-merchant-del');
+      if (delM) {
+        if (!confirm('Usunąć handlarza?')) return;
+        await apiFetch(`/merchants/${delM.dataset.id}`, { method: 'DELETE' });
+        await this.load();
+        return;
+      }
+      const editL = e.target.closest('.dm-loot-edit');
+      if (editL) { this.showEditLootTable(editL.dataset.id); return; }
+      const delL = e.target.closest('.dm-loot-del');
+      if (delL) {
+        if (!confirm('Usunąć tabelę?')) return;
+        await apiFetch(`/loot-tables/${delL.dataset.id}`, { method: 'DELETE' });
+        await this.load();
+        return;
+      }
+      const editC = e.target.closest('.dm-custom-edit');
+      if (editC) { this.showEditCustomItem(editC.dataset.id); return; }
+      const delC = e.target.closest('.dm-custom-del');
+      if (delC) {
+        if (!confirm('Usunąć ten przedmiot? Sklepy/łupy które już go zawierają zostaną nietknięte.')) return;
+        await apiFetch(`/custom-items/${delC.dataset.id}`, { method: 'DELETE' });
+        await this.load();
+      }
+    });
   },
 
   // ===== Custom items helpers =====
@@ -123,40 +267,6 @@ const DMEconomy = {
     return DndRules.getItemTemplate(templateId);
   },
 
-  showHub() {
-    const chars = document.querySelectorAll('#campaign-characters .character-card');
-    const charOptions = Characters.campaignCharacters?.map((c) =>
-      `<option value="${c.id}">${escapeHtml(c.name)}</option>`
-    ).join('') || '';
-
-    showGenericModal('💰 Ekonomia kampanii', `
-      <div class="dm-economy-hub">
-        <div class="dm-economy-actions">
-          <button type="button" class="btn btn-primary" id="dm-eco-new-merchant">➕ Nowy handlarz</button>
-          <button type="button" class="btn btn-secondary" id="dm-eco-new-loot-table">📦 Tabela łupu</button>
-          <button type="button" class="btn btn-success" id="dm-eco-new-item">🛠️ Własny przedmiot</button>
-          <button type="button" class="btn btn-secondary" id="dm-eco-grant-coins">🪙 Przyznaj monety</button>
-          <button type="button" class="btn btn-warning" id="dm-eco-send-loot">🎁 Wyślij łup</button>
-        </div>
-        <h4>Handlarze</h4>
-        <div class="dm-merchant-list">${this.renderMerchantList()}</div>
-        <h4>Tabele łupu</h4>
-        <div class="dm-loot-table-list">${this.renderLootTableList()}</div>
-        <h4>Własne przedmioty</h4>
-        <div class="dm-custom-item-list">${this.renderCustomItemList()}</div>
-      </div>
-    `, 'modal-xl');
-
-    document.getElementById('dm-eco-new-merchant')?.addEventListener('click', () => this.showCreateMerchant());
-    document.getElementById('dm-eco-new-loot-table')?.addEventListener('click', () => this.showCreateLootTable());
-    document.getElementById('dm-eco-new-item')?.addEventListener('click', () => this.showCreateCustomItem());
-    document.getElementById('dm-eco-grant-coins')?.addEventListener('click', () => this.showGrantCoins(charOptions));
-    document.getElementById('dm-eco-send-loot')?.addEventListener('click', () => this.showSendLoot(charOptions));
-    this.bindMerchantListEvents();
-    this.bindLootTableListEvents();
-    this.bindCustomItemListEvents();
-  },
-
   renderMerchantList() {
     if (!this.merchants.length) return '<p class="info-text">Brak handlarzy.</p>';
     return this.merchants.map((m) => `
@@ -186,41 +296,6 @@ const DMEconomy = {
     `).join('');
   },
 
-  bindMerchantListEvents() {
-    document.querySelectorAll('.dm-merchant-open').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        App.socket?.emit('merchant-open', { merchantId: btn.dataset.id });
-        showToast('Handlarz ogłoszony na czacie', 'success');
-        this.load();
-      });
-    });
-    document.querySelectorAll('.dm-merchant-edit').forEach((btn) => {
-      btn.addEventListener('click', () => this.showEditMerchant(btn.dataset.id));
-    });
-    document.querySelectorAll('.dm-merchant-del').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        if (!confirm('Usunąć handlarza?')) return;
-        await apiFetch(`/merchants/${btn.dataset.id}`, { method: 'DELETE' });
-        await this.load();
-        this.showHub();
-      });
-    });
-  },
-
-  bindLootTableListEvents() {
-    document.querySelectorAll('.dm-loot-edit').forEach((btn) => {
-      btn.addEventListener('click', () => this.showEditLootTable(btn.dataset.id));
-    });
-    document.querySelectorAll('.dm-loot-del').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        if (!confirm('Usunąć tabelę?')) return;
-        await apiFetch(`/loot-tables/${btn.dataset.id}`, { method: 'DELETE' });
-        await this.load();
-        this.showHub();
-      });
-    });
-  },
-
   renderCustomItemList() {
     if (!this.customItems.length) return '<p class="info-text">Brak własnych przedmiotów. Stwórz pierwszy, by używać go w sklepach i łupach.</p>';
     const catLabels = { weapon: '⚔ broń', armor: '🛡 zbroja', shield: '🛡 tarcza', gear: '🎒 wyposażenie', potion: '🧪 mikstura', wondrous: '✨ cudowne', scroll: '📜 zwój', tool: '🔧 narzędzia' };
@@ -238,20 +313,6 @@ const DMEconomy = {
         </div>
       </div>
     `).join('');
-  },
-
-  bindCustomItemListEvents() {
-    document.querySelectorAll('.dm-custom-edit').forEach((btn) => {
-      btn.addEventListener('click', () => this.showEditCustomItem(btn.dataset.id));
-    });
-    document.querySelectorAll('.dm-custom-del').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        if (!confirm('Usunąć ten przedmiot? Sklepy/łupy które już go zawierają zostaną nietknięte.')) return;
-        await apiFetch(`/custom-items/${btn.dataset.id}`, { method: 'DELETE' });
-        await this.load();
-        this.showHub();
-      });
-    });
   },
 
   catalogOptions() {
@@ -280,6 +341,19 @@ const DMEconomy = {
       <div id="dm-shop-lines"></div>
       <button type="button" class="btn btn-primary" id="dm-merchant-save" style="margin-top:12px">Zapisz handlarza</button>
     `, 'modal-lg');
+
+    setTimeout(() => {
+      if (typeof AISuggest !== 'undefined') {
+        AISuggest.attachToGenericModal('merchant', () => ({
+          name: document.getElementById('dm-merchant-name')?.value
+        }), (r) => {
+          AISuggest.applyMerchant(r);
+          if (r.suggestedItems?.length) {
+            showToast(`AI zasugerowało ${r.suggestedItems.length} pozycji — dodaj je ręcznie z katalogu`, 'info');
+          }
+        });
+      }
+    }, 0);
 
     const lines = [];
     const renderLines = () => {
@@ -360,7 +434,7 @@ const DMEconomy = {
         });
         closeModal('generic-modal');
         await this.load();
-        this.showHub();
+        this._refreshPanel();
       };
     }, 50);
   },
@@ -378,6 +452,14 @@ const DMEconomy = {
       <div id="dm-loot-entries"></div>
       <button type="button" class="btn btn-primary" id="dm-loot-save">Zapisz tabelę</button>
     `, 'modal-lg');
+
+    setTimeout(() => {
+      if (typeof AISuggest !== 'undefined') {
+        AISuggest.attachToGenericModal('loot_table', () => ({
+          name: document.getElementById('dm-loot-name')?.value
+        }), (r) => AISuggest.applyLootTable(r));
+      }
+    }, 0);
 
     const entries = [];
     const render = () => {
@@ -435,7 +517,7 @@ const DMEconomy = {
         });
         closeModal('generic-modal');
         await this.load();
-        this.showHub();
+        this._refreshPanel();
       };
     }, 50);
   },
@@ -652,6 +734,15 @@ const DMEconomy = {
       </div>
     `, 'modal-lg');
 
+    setTimeout(() => {
+      if (typeof AISuggest !== 'undefined') {
+        AISuggest.attachToGenericModal('custom_item', () => ({
+          name: document.getElementById('ci-name')?.value,
+          category: document.getElementById('ci-category')?.value
+        }), (r) => AISuggest.applyCustomItem(r));
+      }
+    }, 0);
+
     const fields = ['weapon', 'armor', 'shield', 'gear'];
     const refreshFields = () => {
       const c = document.getElementById('ci-category').value;
@@ -705,7 +796,7 @@ const DMEconomy = {
         }
         closeModal('generic-modal');
         await this.load();
-        this.showHub();
+        this._refreshPanel();
       } catch (err) {
         showToast(err.message || 'Błąd zapisu', 'error');
       }

@@ -103,17 +103,24 @@ const MapProps = {
     return cells;
   },
 
-  drawTokenOverlay(ctx, token, gs) {
+  drawTokenOverlay(ctx, token) {
     const tpl = this.getTemplateForToken(token);
     if (!tpl) return;
-    const tx = token.x * gs;
-    const ty = token.y * gs;
-    const size = (token.size || 1) * gs;
+    const tl = typeof BattleMap !== 'undefined' && BattleMap.cellTopLeftPx
+      ? BattleMap.cellTopLeftPx(token.x, token.y)
+      : { x: token.x * 40, y: token.y * 40 };
+    const tx = tl.x;
+    const ty = tl.y;
+    const cell = typeof BattleMap !== 'undefined' && BattleMap.cellSizePx
+      ? BattleMap.cellSizePx()
+      : { w: 40, h: 40 };
+    const sizeW = (token.size || 1) * cell.w;
+    const sizeH = (token.size || 1) * cell.h;
     ctx.save();
-    ctx.font = `${Math.floor(size * 0.55)}px serif`;
+    ctx.font = `${Math.floor(Math.min(sizeW, sizeH) * 0.55)}px serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(tpl.icon || '📦', tx + size / 2, ty + size / 2);
+    ctx.fillText(tpl.icon || '📦', tx + sizeW / 2, ty + sizeH / 2);
     ctx.restore();
   }
 };

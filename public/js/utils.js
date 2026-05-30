@@ -73,17 +73,105 @@ function closeModal(modalId) {
   document.getElementById(modalId).classList.remove('active');
 }
 
-function showGenericModal(title, bodyHtml, sizeClass) {
-  document.getElementById('generic-modal-title').textContent = title;
+function stripLeadingEmoji(str) {
+  if (!str) return '';
+  const trimmed = String(str).replace(/^[\s\p{Extended_Pictographic}\p{Emoji_Presentation}]+/u, '').trim();
+  return trimmed || String(str);
+}
+
+function showGenericModal(title, bodyHtml, sizeClass, opts) {
+  const options = opts && typeof opts === 'object' ? opts : {};
+  const modal = document.getElementById('generic-modal');
+  const headerEl = modal?.querySelector('.modal-header');
+  const icon = options.icon || '📋';
+  const displayTitle = options.title != null ? options.title : stripLeadingEmoji(title);
+  const meta = options.meta;
+  if (headerEl) {
+    headerEl.outerHTML = featureModalHeader(icon, displayTitle, meta);
+    const closeBtn = modal.querySelector('.modal-close');
+    if (closeBtn) closeBtn.onclick = () => closeModal('generic-modal');
+  } else {
+    const titleEl = document.getElementById('generic-modal-title');
+    if (titleEl) titleEl.textContent = title;
+  }
   document.getElementById('generic-modal-body').innerHTML = bodyHtml;
   const content = document.querySelector('#generic-modal .modal-content');
   if (content) {
-    content.classList.remove('modal-xl', 'modal-lg', 'map-creator-modal');
+    content.classList.remove('modal-xl', 'modal-lg', 'map-creator-modal', 'dm-feature-editor-shell');
+    content.classList.add('dm-feature-editor-shell');
     if (sizeClass) {
       sizeClass.split(/\s+/).filter(Boolean).forEach((cls) => content.classList.add(cls));
     }
   }
   openModal('generic-modal');
+}
+
+/** Shell modala narzędzia MG (overlay). footerHtml: string lub null = brak stopki. */
+function buildFeatureModalHtml({ icon, title, meta, modalClass = '', toolbarHtml = '', bodyHtml = '', footerHtml = null }) {
+  const toolbar = toolbarHtml
+    ? (toolbarHtml.includes('dm-feature-toolbar') ? toolbarHtml : `<div class="dm-feature-toolbar">${toolbarHtml}</div>`)
+    : '';
+  let footer = '';
+  if (footerHtml !== null && footerHtml !== undefined) {
+    footer = footerHtml.includes('modal-footer')
+      ? footerHtml
+      : `<div class="modal-footer dm-feature-footer">${footerHtml}</div>`;
+  }
+  const classes = ['modal', 'dm-feature-modal', modalClass].filter(Boolean).join(' ');
+  return `
+    <div class="${classes}">
+      ${featureModalHeader(icon, title, meta)}
+      ${toolbar}
+      <div class="modal-body dm-feature-body">${bodyHtml}</div>
+      ${footer}
+    </div>`;
+}
+
+function createStackedFeatureOverlay(overlayId, modalHtml) {
+  const overlay = createFeatureOverlay(overlayId, modalHtml);
+  overlay.classList.add('modal-overlay--stacked');
+  return overlay;
+}
+
+/** Nagłówek okna narzędzia MG (overlay). meta: liczba (badge) lub string (podtytuł). */
+function featureModalHeader(icon, title, meta) {
+  const countBadge = typeof meta === 'number' ? `<span class="dm-feature-count">${meta}</span>` : '';
+  const subLine = typeof meta === 'string' && meta
+    ? `<p class="dm-feature-header__sub">${escapeHtml(meta)}</p>` : '';
+  return `
+    <div class="modal-header dm-feature-header">
+      <div class="dm-feature-header__brand">
+        <span class="dm-feature-header__icon" aria-hidden="true">${icon}</span>
+        <div class="dm-feature-header__titles">
+          <h3>${escapeHtml(title)}${countBadge}</h3>
+          ${subLine}
+        </div>
+      </div>
+      <button type="button" class="modal-close" data-action="close" aria-label="Zamknij">✕</button>
+    </div>`;
+}
+
+function featureModalFooter(extraHtml) {
+  const extra = extraHtml ? `${extraHtml}` : '';
+  return `<div class="modal-footer dm-feature-footer">${extra}<button type="button" class="btn btn-secondary" data-action="close">Zamknij</button></div>`;
+}
+
+function bindFeatureOverlay(overlay) {
+  const close = () => overlay.remove();
+  overlay.querySelectorAll('[data-action="close"]').forEach((b) => b.addEventListener('click', close));
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  return { overlay, close };
+}
+
+function createFeatureOverlay(overlayId, modalHtml) {
+  document.getElementById(overlayId)?.remove();
+  const overlay = document.createElement('div');
+  overlay.id = overlayId;
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = modalHtml;
+  document.body.appendChild(overlay);
+  bindFeatureOverlay(overlay);
+  return overlay;
 }
 
 function calcModifier(score) {

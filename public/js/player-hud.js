@@ -115,6 +115,8 @@ const PlayerHud = {
           </div>
         </div>` : ''}
 
+        ${this.renderInspirationBlock(c, canEdit)}
+
         ${weapons.length ? `
         <div class="hud-section">
           <div class="hud-section-title">Broń</div>
@@ -184,7 +186,37 @@ const PlayerHud = {
     if (action === 'weapon-atk') {
       const weapon = Characters.getWeaponById(c, btn.dataset.weaponId);
       if (weapon) Dice.rollForCharacter(c, 'weapon-attack', { weapon });
+      return;
     }
+
+    if (action === 'inspiration-arm' && this.canEdit(c)) {
+      if (typeof Inspiration !== 'undefined') Inspiration.arm(c);
+      return;
+    }
+    if (action === 'inspiration-disarm') {
+      if (typeof Inspiration !== 'undefined') Inspiration.disarm();
+      return;
+    }
+  },
+
+  renderInspirationBlock(c, canEdit) {
+    const insp = parseInt(c.inspiration, 10) || 0;
+    const armed = (typeof Inspiration !== 'undefined') && Inspiration.isArmedFor(c.id);
+    const dots = Array.from({ length: Math.max(insp, 1) }, (_, i) =>
+      `<span class="hud-inspiration-dot ${i < insp ? 'is-full' : 'is-empty'}">⭐</span>`
+    ).join('');
+    return `
+      <div class="hud-section hud-inspiration ${armed ? 'is-armed' : ''}" title="Inspiracja: gracz może wydać 1 dla przewagi na dowolny rzut d20">
+        <div class="hud-section-title">⭐ Inspiracja: ${insp}</div>
+        <div class="hud-inspiration-row">
+          <div class="hud-inspiration-dots">${insp > 0 ? dots : '<span class="hud-inspiration-empty">Brak</span>'}</div>
+          ${canEdit && insp > 0 ? `
+            <button type="button" class="hud-btn-sm ${armed ? 'hud-btn-armed' : 'hud-btn-heal'}" data-hud-action="inspiration-${armed ? 'disarm' : 'arm'}">
+              ${armed ? '✕ Anuluj' : '⚡ Użyj na następny rzut'}
+            </button>
+          ` : ''}
+        </div>
+      </div>`;
   },
 
   refreshFromCharacter(c) {

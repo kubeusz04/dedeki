@@ -38,6 +38,10 @@ const BattleMap = {
   measureStart: null,
   measureEnd: null,
   localTrailSegments: [],
+  _gridAlignDrag: null,
+  _mapCampaignId: null,
+  _initialMapFitDone: false,
+  _pendingGridAlign: null,
 
   init() {
     this.canvas = document.getElementById('battle-map');
@@ -72,11 +76,19 @@ const BattleMap = {
     document.getElementById('btn-map-toggle-trails')?.addEventListener('click', () => this.toggleTrails());
     document.getElementById('btn-map-zoom-in')?.addEventListener('click', () => this.setZoom(this.zoom + 0.15));
     document.getElementById('btn-map-zoom-out')?.addEventListener('click', () => this.setZoom(this.zoom - 0.15));
-    document.getElementById('map-grid-size')?.addEventListener('change', (e) => {
-      if (App.socket && App.currentCampaign) {
-        App.socket.emit('map-update-settings', { grid_size: parseInt(e.target.value, 10) });
-      }
+    document.getElementById('map-grid-cell-width')?.addEventListener('change', (e) => {
+      this.commitGridCellSizeFromInputs();
     });
+    document.getElementById('map-grid-cell-height')?.addEventListener('change', (e) => {
+      this.commitGridCellSizeFromInputs();
+    });
+    document.getElementById('map-grid-cell-width')?.addEventListener('input', () => {
+      this.onGridCellSizeInput();
+    });
+    document.getElementById('map-grid-cell-height')?.addEventListener('input', () => {
+      this.onGridCellSizeInput();
+    });
+    this.bindGridAlignControls();
     document.getElementById('map-resolution-preset')?.addEventListener('change', (e) => {
       const preset = e.target.value;
       if (!preset) return;
@@ -87,6 +99,8 @@ const BattleMap = {
         grid_width: dims.w,
         grid_height: dims.h,
         grid_size: dims.gs,
+        grid_cell_width: dims.gs,
+        grid_cell_height: dims.gs,
       });
     });
 
@@ -114,6 +128,11 @@ const BattleMap = {
     });
 
     this.viewport?.addEventListener('wheel', (e) => {
+      if (this.toolMode === 'grid-align' && this.isDm()) {
+        e.preventDefault();
+        this.handleGridAlignWheel(e);
+        return;
+      }
       if (e.shiftKey) return;
       e.preventDefault();
       const step = e.ctrlKey || e.metaKey ? 0.2 : 0.1;
@@ -160,6 +179,427 @@ const BattleMap = {
     return App.currentCampaign?.role === 'dm';
   },
 
+  normalizeGridOffsets(settings) {
+    if (!settings) return;
+    settings.grid_offset_x = Math.round(Number(settings.grid_offset_x) || 0);
+    settings.grid_offset_y = Math.round(Number(settings.grid_offset_y) || 0);
+  },
+
+  _gridAlignStorageKey() {
+    const id = App.currentCampaign?.id;
+    return id ? `dedeki-map-grid-align:${id}` : '';
+  },
+
+  readStoredGridAlign() {
+    const key = this._gridAlignStorageKey();
+    if (!key) return null;
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) {
+        const legacyKey = key.replace('grid-align', 'grid-offset');
+        const legacyRaw = localStorage.getItem(legacyKey);
+        if (!legacyRaw) return null;
+        const legacy = JSON.parse(legacyRaw);
+        return {
+          x: Math.round(Number(legacy.x) || 0),
+          y: Math.round(Number(legacy.y) || 0),
+          gsW: null,
+          gsH: null
+        };
+      }
+      const p = JSON.parse(raw);
+      return {
+        x: Math.round(Number(p.x) || 0),
+        y: Math.round(Number(p.y) || 0),
+        gsW: p.gsW != null ? this.clampGridCellSize(p.gsW) : null,
+        gsH: p.gsH != null ? this.clampGridCellSize(p.gsH) : null
+      };
+    } catch (_e) {
+      return null;
+    }
+  },
+
+  writeStoredGridAlign(x, y, gsW, gsH) {
+    const key = this._gridAlignStorageKey();
+    if (!key) return;
+    localStorage.setItem(key, JSON.stringify({
+      x: Math.round(Number(x) || 0),
+      y: Math.round(Number(y) || 0),
+      gsW: this.clampGridCellSize(gsW),
+      gsH: this.clampGridCellSize(gsH)
+    }));
+  },
+
+  mergeGridAlignFromSources(settings) {
+    if (!settings || !this.isDm()) return;
+    this.normalizeGridOffsets(settings);
+    this.normalizeCellSizes(settings);
+
+    if (this._pendingGridAlign) {
+      const p = this._pendingGridAlign;
+      const matches = settings.grid_offset_x === p.x
+        && settings.grid_offset_y === p.y
+        && settings.grid_cell_width === p.gsW
+        && settings.grid_cell_height === p.gsH;
+      if (matches) {
+        this._pendingGridAlign = null;
+        this.writeStoredGridAlign(p.x, p.y, p.gsW, p.gsH);
+      } else {
+        settings.grid_offset_x = p.x;
+        settings.grid_offset_y = p.y;
+        settings.grid_cell_width = p.gsW;
+        settings.grid_cell_height = p.gsH;
+        settings.grid_size = Math.max(p.gsW, p.gsH);
+      }
+      return;
+    }
+
+    const stored = this.readStoredGridAlign();
+    let restored = false;
+    if (stored) {
+      if (settings.grid_offset_x === 0 && settings.grid_offset_y === 0
+        && (stored.x !== 0 || stored.y !== 0)) {
+        settings.grid_offset_x = stored.x;
+        settings.grid_offset_y = stored.y;
+        restored = true;
+      }
+      const base = parseInt(settings.grid_size, 10) || 40;
+      if (stored.gsW && stored.gsH
+        && settings.grid_cell_width === base && settings.grid_cell_height === base
+        && (stored.gsW !== base || stored.gsH !== base)) {
+        settings.grid_cell_width = stored.gsW;
+        settings.grid_cell_height = stored.gsH;
+        settings.grid_size = Math.max(stored.gsW, stored.gsH);
+        restored = true;
+      }
+      if (restored && App.socket?.connected) {
+        this._pendingGridAlign = {
+          x: settings.grid_offset_x,
+          y: settings.grid_offset_y,
+          gsW: settings.grid_cell_width,
+          gsH: settings.grid_cell_height
+        };
+        App.socket.emit('map-update-settings', {
+          grid_offset_x: settings.grid_offset_x,
+          grid_offset_y: settings.grid_offset_y,
+          grid_cell_width: settings.grid_cell_width,
+          grid_cell_height: settings.grid_cell_height,
+          grid_size: settings.grid_size
+        });
+      } else {
+        this.writeStoredGridAlign(
+          settings.grid_offset_x,
+          settings.grid_offset_y,
+          settings.grid_cell_width,
+          settings.grid_cell_height
+        );
+      }
+    } else if (settings.grid_offset_x !== 0 || settings.grid_offset_y !== 0
+      || settings.grid_cell_width !== 40 || settings.grid_cell_height !== 40) {
+      this.writeStoredGridAlign(
+        settings.grid_offset_x,
+        settings.grid_offset_y,
+        settings.grid_cell_width,
+        settings.grid_cell_height
+      );
+    }
+  },
+
+  normalizeCellSizes(settings) {
+    if (!settings) return;
+    const base = parseInt(settings.grid_size, 10) || 40;
+    const w = parseInt(settings.grid_cell_width, 10);
+    const h = parseInt(settings.grid_cell_height, 10);
+    settings.grid_cell_width = w > 0 ? w : base;
+    settings.grid_cell_height = h > 0 ? h : base;
+  },
+
+  gridMetrics() {
+    this.normalizeCellSizes(this.settings);
+    const gsW = this.settings?.grid_cell_width || 40;
+    const gsH = this.settings?.grid_cell_height || 40;
+    const ox = Math.round(Number(this.settings?.grid_offset_x) || 0);
+    const oy = Math.round(Number(this.settings?.grid_offset_y) || 0);
+    const gs = Math.max(gsW, gsH);
+    return { gsW, gsH, gs, ox, oy };
+  },
+
+  cellSizePx() {
+    const { gsW, gsH } = this.gridMetrics();
+    return { w: gsW, h: gsH };
+  },
+
+  gridAreaPixelSize() {
+    const gw = this.settings?.grid_width || 25;
+    const gh = this.settings?.grid_height || 18;
+    const { gsW, gsH } = this.gridMetrics();
+    return { w: gw * gsW, h: gh * gsH };
+  },
+
+  backgroundPixelSize() {
+    if (!this.backgroundImageObj) return null;
+    const w = this.backgroundImageObj.naturalWidth;
+    const h = this.backgroundImageObj.naturalHeight;
+    if (!w || !h) return null;
+    return { w, h };
+  },
+
+  mapPixelSize() {
+    const grid = this.gridAreaPixelSize();
+    const bg = this.backgroundPixelSize();
+    if (!bg) return grid;
+    return {
+      w: Math.max(grid.w, bg.w),
+      h: Math.max(grid.h, bg.h)
+    };
+  },
+
+  clampGridCellSize(n) {
+    const v = Math.round(Number(n) || 40);
+    return Math.max(20, Math.min(200, v));
+  },
+
+  setGridCellSize(gsW, gsH, opts = {}) {
+    if (!this.settings) return;
+    const w = this.clampGridCellSize(gsW);
+    const h = this.clampGridCellSize(gsH);
+    this.settings.grid_cell_width = w;
+    this.settings.grid_cell_height = h;
+    this.settings.grid_size = Math.max(w, h);
+    this.syncGridCellSizeUi();
+    this.applyZoom();
+    this.render();
+    if (opts.persist) {
+      if (!this.isDm()) return;
+      const { ox, oy } = this.gridMetrics();
+      this._pendingGridAlign = { x: ox, y: oy, gsW: w, gsH: h };
+      this.writeStoredGridAlign(ox, oy, w, h);
+      if (!App.socket || !App.currentCampaign) {
+        showToast('Zapisano lokalnie (brak połączenia z serwerem)', 'warning');
+        return;
+      }
+      App.socket.emit('map-update-settings', {
+        grid_cell_width: w,
+        grid_cell_height: h,
+        grid_size: this.settings.grid_size
+      });
+    }
+  },
+
+  emitGridCellSizeUpdate(partial) {
+    if (!App.socket || !App.currentCampaign) return;
+    const { gsW, gsH } = this.gridMetrics();
+    this.setGridCellSize(partial.width ?? gsW, partial.height ?? gsH, { persist: true });
+  },
+
+  onGridCellSizeInput() {
+    if (!this.isDm()) return;
+    const w = parseInt(document.getElementById('map-grid-cell-width')?.value, 10);
+    const h = parseInt(document.getElementById('map-grid-cell-height')?.value, 10);
+    this.setGridCellSize(
+      Number.isNaN(w) ? this.settings?.grid_cell_width || 40 : w,
+      Number.isNaN(h) ? this.settings?.grid_cell_height || 40 : h,
+      { persist: false }
+    );
+    clearTimeout(this._gridSizeDebounce);
+    this._gridSizeDebounce = setTimeout(() => this.commitGridCellSizeFromInputs(), 350);
+  },
+
+  commitGridCellSizeFromInputs() {
+    clearTimeout(this._gridSizeDebounce);
+    const w = parseInt(document.getElementById('map-grid-cell-width')?.value, 10);
+    const h = parseInt(document.getElementById('map-grid-cell-height')?.value, 10);
+    this.setGridCellSize(
+      Number.isNaN(w) ? 40 : w,
+      Number.isNaN(h) ? 40 : h,
+      { persist: true }
+    );
+  },
+
+  handleGridAlignWheel(e) {
+    const { gsW, gsH } = this.gridMetrics();
+    const step = e.deltaY > 0 ? -2 : 2;
+    if (e.ctrlKey || e.metaKey) {
+      this.setGridCellSize(gsW + step, gsH, { persist: false });
+    } else if (e.altKey) {
+      this.setGridCellSize(gsW, gsH + step, { persist: false });
+    } else {
+      this.setGridCellSize(gsW + step, gsH + step, { persist: false });
+    }
+    clearTimeout(this._gridSizeDebounce);
+    this._gridSizeDebounce = setTimeout(() => this.commitGridCellSizeFromInputs(), 250);
+  },
+
+  syncGridCellSizeUi() {
+    if (!this.settings) return;
+    this.normalizeCellSizes(this.settings);
+    const wEl = document.getElementById('map-grid-cell-width');
+    const hEl = document.getElementById('map-grid-cell-height');
+    if (wEl) wEl.value = this.settings.grid_cell_width;
+    if (hEl) hEl.value = this.settings.grid_cell_height;
+  },
+
+  bindGridAlignControls() {
+    const panel = document.getElementById('map-panel');
+    if (!panel || panel.dataset.gridAlignBound) return;
+    panel.dataset.gridAlignBound = '1';
+
+    panel.addEventListener('click', (e) => {
+      const nudge = e.target.closest('[data-grid-nudge]');
+      if (nudge) {
+        e.preventDefault();
+        const parts = (nudge.dataset.gridNudge || '0,0').split(',').map((n) => parseInt(n, 10) || 0);
+        this.nudgeGridOffset(parts[0], parts[1]);
+        return;
+      }
+      if (e.target.closest('#btn-grid-offset-reset')) {
+        e.preventDefault();
+        this.setGridOffset(0, 0, { persist: true });
+      }
+    });
+
+    const onOffsetChange = () => this.commitGridOffsetFromInputs();
+    const onOffsetInput = () => {
+      const x = parseInt(document.getElementById('map-grid-offset-x')?.value, 10) || 0;
+      const y = parseInt(document.getElementById('map-grid-offset-y')?.value, 10) || 0;
+      this.setGridOffset(x, y, { persist: false });
+      clearTimeout(this._gridOffsetDebounce);
+      this._gridOffsetDebounce = setTimeout(() => this.commitGridOffsetFromInputs(), 350);
+    };
+    document.getElementById('map-grid-offset-x')?.addEventListener('change', onOffsetChange);
+    document.getElementById('map-grid-offset-y')?.addEventListener('change', onOffsetChange);
+    document.getElementById('map-grid-offset-x')?.addEventListener('input', onOffsetInput);
+    document.getElementById('map-grid-offset-y')?.addEventListener('input', onOffsetInput);
+  },
+
+  isGridAlignMode(e) {
+    return this.toolMode === 'grid-align' || (this.isDm() && this.toolMode === 'select' && !!e?.shiftKey);
+  },
+
+  startGridAlignDrag(mx, my, e) {
+    if (!this.settings) {
+      showToast('Mapa jeszcze się ładuje — poczekaj chwilę', 'warning');
+      return;
+    }
+    this._userZoomLocked = true;
+    const { gsW, gsH, ox, oy } = this.gridMetrics();
+    const resize = !!(e?.ctrlKey || e?.metaKey);
+    this._gridAlignDrag = {
+      startMx: mx,
+      startMy: my,
+      startOx: ox,
+      startOy: oy,
+      startGsW: gsW,
+      startGsH: gsH,
+      mode: resize ? 'resize' : 'move'
+    };
+    if (this._gridAlignWinBound) return;
+    this._gridAlignWinBound = true;
+    this._onGridAlignMove = (ev) => {
+      if (!this._gridAlignDrag) return;
+      const coords = this.canvasCoords(ev);
+      const d = this._gridAlignDrag;
+      if (d.mode === 'resize') {
+        this.setGridCellSize(
+          d.startGsW + Math.round(coords.mx - d.startMx),
+          d.startGsH + Math.round(coords.my - d.startMy),
+          { persist: false }
+        );
+      } else {
+        this.setGridOffset(
+          d.startOx + Math.round(coords.mx - d.startMx),
+          d.startOy + Math.round(coords.my - d.startMy),
+          { persist: false }
+        );
+      }
+    };
+    this._onGridAlignUp = () => this.finishGridAlignDrag();
+    window.addEventListener('mousemove', this._onGridAlignMove);
+    window.addEventListener('mouseup', this._onGridAlignUp);
+  },
+
+  finishGridAlignDrag() {
+    if (!this._gridAlignDrag) return;
+    const wasResize = this._gridAlignDrag.mode === 'resize';
+    this._gridAlignDrag = null;
+    if (this._onGridAlignMove) {
+      window.removeEventListener('mousemove', this._onGridAlignMove);
+      this._onGridAlignMove = null;
+    }
+    if (this._onGridAlignUp) {
+      window.removeEventListener('mouseup', this._onGridAlignUp);
+      this._onGridAlignUp = null;
+    }
+    this._gridAlignWinBound = false;
+    const { ox, oy, gsW, gsH } = this.gridMetrics();
+    if (wasResize) {
+      this.setGridCellSize(gsW, gsH, { persist: true });
+    } else {
+      this.setGridOffset(ox, oy, { persist: true });
+    }
+  },
+
+  cellTopLeftPx(cx, cy) {
+    const { gsW, gsH, ox, oy } = this.gridMetrics();
+    return { x: ox + cx * gsW, y: oy + cy * gsH };
+  },
+
+  cellCenterPx(cx, cy) {
+    const { gsW, gsH, ox, oy } = this.gridMetrics();
+    return { x: ox + cx * gsW + gsW / 2, y: oy + cy * gsH + gsH / 2 };
+  },
+
+  syncGridOffsetUi() {
+    const { ox, oy } = this.gridMetrics();
+    const elX = document.getElementById('map-grid-offset-x');
+    const elY = document.getElementById('map-grid-offset-y');
+    if (elX) elX.value = ox;
+    if (elY) elY.value = oy;
+  },
+
+  setGridOffset(x, y, opts = {}) {
+    clearTimeout(this._gridOffsetDebounce);
+    if (!this.settings) {
+      if (opts.persist) showToast('Mapa nie jest jeszcze załadowana', 'warning');
+      return;
+    }
+    const ox = Math.round(Number(x) || 0);
+    const oy = Math.round(Number(y) || 0);
+    const { gsW, gsH } = this.gridMetrics();
+    this.settings.grid_offset_x = ox;
+    this.settings.grid_offset_y = oy;
+    this.writeStoredGridAlign(ox, oy, gsW, gsH);
+    this.syncGridOffsetUi();
+    this.render();
+    if (opts.persist) {
+      if (!this.isDm()) return;
+      this._pendingGridAlign = { x: ox, y: oy, gsW, gsH };
+      if (!App.socket || !App.currentCampaign) {
+        showToast('Zapisano lokalnie (brak połączenia z serwerem)', 'warning');
+        return;
+      }
+      App.socket.emit('map-update-settings', { grid_offset_x: ox, grid_offset_y: oy });
+    }
+  },
+
+  nudgeGridOffset(dx, dy) {
+    if (!this.isDm()) return;
+    clearTimeout(this._gridOffsetDebounce);
+    const { ox, oy } = this.gridMetrics();
+    this.setGridOffset(ox + dx, oy + dy, { persist: true });
+  },
+
+  commitGridOffsetFromInputs() {
+    clearTimeout(this._gridOffsetDebounce);
+    const x = parseInt(document.getElementById('map-grid-offset-x')?.value, 10);
+    const y = parseInt(document.getElementById('map-grid-offset-y')?.value, 10);
+    this.setGridOffset(
+      Number.isNaN(x) ? 0 : x,
+      Number.isNaN(y) ? 0 : y,
+      { persist: true }
+    );
+  },
+
   visibleTokens() {
     if (this.isDm()) return this.tokens;
     return this.tokens.filter((t) => t.is_visible);
@@ -179,7 +619,7 @@ const BattleMap = {
       this.canvas.className = `map-tool-${mode}`;
     }
     const hints = {
-      select: 'Przeciągnij tokeny. Prawy przycisk (MG) = opcje tokenu.',
+      select: 'Przeciągnij tokeny. MG: Shift+przeciągnij = wyrównanie siatki do tła. Prawy przycisk = opcje tokenu.',
       pointer: 'Kliknij mapę — wszyscy zobaczą wskaźnik. Alt+klik działa zawsze.',
       measure: 'Kliknij start i koniec — odległość w kratkach (D&D).',
       'fog-reveal': 'Przeciągnij po mapie, aby odsłonić mgłę. Włącz mgłę przyciskiem „Mgła”.',
@@ -190,7 +630,8 @@ const BattleMap = {
       'terrain-paint': 'Maluj trudny teren / efekt (MG).',
       'terrain-erase': 'Gumka terenu (MG).',
       'zone-square': 'Strefa kwadratowa — kliknij i przeciągnij (MG).',
-      'prop-place': 'Kliknij mapę, aby postawić wybrany rekwizyt (MG).'
+      'prop-place': 'Kliknij mapę, aby postawić wybrany rekwizyt (MG).',
+      'grid-align': 'Przeciągnij = przesuń linie względem tła · Ctrl+przeciągnij = odstęp linii · kółko = skala · Alt/Ctrl+kółko = jedna oś. Tło JPG nie jest rozciągane.'
     };
     const hintEl = document.getElementById('map-tool-hint');
     if (hintEl) hintEl.textContent = hints[mode] || hints.select;
@@ -199,6 +640,10 @@ const BattleMap = {
       this.measureEnd = null;
     }
     if (typeof MapZones !== 'undefined') MapZones.cancelPlacement();
+    if (mode === 'grid-align' && this.isDm()) {
+      this._userZoomLocked = true;
+      showToast('⊞ Przesuń siatkę na tło · Ctrl+przeciągnij = odstęp linii · kółko = skala', 'info');
+    }
     this.render();
   },
 
@@ -229,9 +674,7 @@ const BattleMap = {
 
   applyZoom() {
     if (!this.settings || !this.canvas) return;
-    const gs = this.settings.grid_size;
-    const w = this.settings.grid_width * gs;
-    const h = this.settings.grid_height * gs;
+    const { w, h } = this.mapPixelSize();
     this.canvas.style.width = `${w * this.zoom}px`;
     this.canvas.style.height = `${h * this.zoom}px`;
   },
@@ -246,19 +689,22 @@ const BattleMap = {
     return presets[String(preset)] || null;
   },
 
-  detectResolutionPreset(w, h, gs) {
+  detectResolutionPreset(w, h, gsW, gsH) {
     if (w !== 32 || h !== 18) return '';
+    if (gsW !== gsH) return '';
     const map = { 40: '720', 60: '1080', 80: '1440', 120: '2160' };
-    return map[gs] || '';
+    return map[gsW] || '';
   },
 
   syncResolutionSelect() {
     const sel = document.getElementById('map-resolution-preset');
     if (!sel || !this.settings) return;
+    this.normalizeCellSizes(this.settings);
     const preset = this.detectResolutionPreset(
       this.settings.grid_width,
       this.settings.grid_height,
-      this.settings.grid_size
+      this.settings.grid_cell_width,
+      this.settings.grid_cell_height
     );
     sel.value = preset;
   },
@@ -267,9 +713,7 @@ const BattleMap = {
     if (!this.settings || !this.canvas || !this.viewport) return;
     const rect = this.viewport.getBoundingClientRect();
     if (rect.width < 10 || rect.height < 10) return;
-    const gs = this.settings.grid_size;
-    const mapW = this.settings.grid_width * gs;
-    const mapH = this.settings.grid_height * gs;
+    const { w: mapW, h: mapH } = this.mapPixelSize();
     const padding = 16;
     const scaleX = (rect.width - padding) / mapW;
     const scaleY = (rect.height - padding) / mapH;
@@ -281,6 +725,9 @@ const BattleMap = {
   },
 
   scheduleAutoFit() {
+    if (this._userZoomLocked) return;
+    if (this.toolMode === 'grid-align') return;
+    if (this._gridAlignDrag) return;
     if (this._autoFitTimer) cancelAnimationFrame(this._autoFitTimer);
     this._autoFitTimer = requestAnimationFrame(() => {
       this._autoFitTimer = null;
@@ -394,13 +841,27 @@ const BattleMap = {
   },
 
   updateMap(data) {
+    const campId = App.currentCampaign?.id;
+    if (campId !== this._mapCampaignId) {
+      this._mapCampaignId = campId;
+      this._initialMapFitDone = false;
+      this._userZoomLocked = false;
+      this._pendingGridAlign = null;
+    }
     const allTokens = data.tokens || [];
     const allPins = data.pins || [];
     this.tokens = this.isDm() ? allTokens : allTokens.filter((t) => t.is_visible);
     this.pins = this.isDm() ? allPins : allPins.filter((p) => p.is_visible);
+    this.syncTokenHpToCharacterCache(this.tokens);
+    if (typeof MapConditions !== 'undefined') {
+      MapConditions.startAnimation();
+      MapConditions.onTokensRefreshed();
+    }
     const prevBackground = this.settings?.background_image || '';
     this.settings = data.settings || {
       grid_size: 40,
+      grid_cell_width: 40,
+      grid_cell_height: 40,
       grid_width: 25,
       grid_height: 18,
       background_color: '#3b2618',
@@ -408,8 +869,12 @@ const BattleMap = {
       fog_revealed: '[]',
       movement_trails: '{}',
       trails_enabled: 1,
-      grid_opacity: 100
+      grid_opacity: 100,
+      grid_offset_x: 0,
+      grid_offset_y: 0
     };
+    this.normalizeCellSizes(this.settings);
+    this.mergeGridAlignFromSources(this.settings);
     if (!this.isDm() && this.settings) {
       delete this.settings.last_token_move;
     }
@@ -426,18 +891,18 @@ const BattleMap = {
       MapZones.load(zones || []);
     }
 
-    if (document.getElementById('map-grid-size')) {
-      document.getElementById('map-grid-size').value = this.settings.grid_size;
-    }
+    this.syncGridCellSizeUi();
     this.syncResolutionSelect();
     const opacitySlider = document.getElementById('map-grid-opacity');
     const opacityOut = document.getElementById('map-grid-opacity-value');
     const opacity = this.settings.grid_opacity ?? 100;
     if (opacitySlider) opacitySlider.value = opacity;
     if (opacityOut) opacityOut.textContent = `${opacity}%`;
+    this.syncGridOffsetUi();
 
     const nextBackground = this.settings.background_image || '';
     if (nextBackground !== prevBackground) {
+      this._initialMapFitDone = false;
       this.loadBackgroundImage(nextBackground);
     } else {
       this.applyZoom();
@@ -445,7 +910,10 @@ const BattleMap = {
       this.renderSidebar();
       this.scheduleRender();
     }
-    this.scheduleAutoFit();
+    if (!this._initialMapFitDone && !this._userZoomLocked && this.toolMode !== 'grid-align') {
+      this.scheduleAutoFit();
+      this._initialMapFitDone = true;
+    }
   },
 
   moveToken(data) {
@@ -474,10 +942,10 @@ const BattleMap = {
   },
 
   showPointer(data) {
-    const gs = this.settings?.grid_size || 40;
+    const c = this.cellCenterPx(data.x, data.y);
     const entry = {
-      x: data.x * gs + gs / 2,
-      y: data.y * gs + gs / 2,
+      x: c.x,
+      y: c.y,
       label: data.displayName || '?',
       color: data.color || '#c9a227',
       expires: Date.now() + 3500
@@ -527,6 +995,10 @@ const BattleMap = {
       this.backgroundImageObj = image;
       this.applyZoom();
       this.render();
+      if (!this._initialMapFitDone && !this._userZoomLocked && this.toolMode !== 'grid-align') {
+        this.scheduleAutoFit();
+        this._initialMapFitDone = true;
+      }
     };
     image.onerror = () => {
       if (this.backgroundImageSrc !== src) return;
@@ -546,11 +1018,17 @@ const BattleMap = {
 
   getTokenStats(token) {
     const char = this.getCharacterForToken(token);
+    const tokenHpMax = parseInt(token.hp_max, 10) || 0;
+    const tokenHpCurrent = parseInt(token.hp_current, 10);
     if (char) {
+      const hpMax = tokenHpMax > 0 ? tokenHpMax : (char.max_hp || 0);
+      const hpCurrent = tokenHpMax > 0 && Number.isFinite(tokenHpCurrent)
+        ? tokenHpCurrent
+        : (char.current_hp ?? 0);
       return {
         name: char.name,
-        hpCurrent: char.current_hp,
-        hpMax: char.max_hp,
+        hpCurrent,
+        hpMax,
         ac: char.armor_class,
         notes: '',
         fromCharacter: true
@@ -558,12 +1036,26 @@ const BattleMap = {
     }
     return {
       name: token.entity_name,
-      hpCurrent: token.hp_current || 0,
-      hpMax: token.hp_max || 0,
+      hpCurrent: Number.isFinite(tokenHpCurrent) ? tokenHpCurrent : 0,
+      hpMax: tokenHpMax,
       ac: token.ac || 0,
       notes: token.stat_notes || '',
       fromCharacter: false
     };
+  },
+
+  syncTokenHpToCharacterCache(tokens = this.tokens) {
+    if (typeof Characters === 'undefined' || !Array.isArray(tokens)) return;
+    for (const token of tokens) {
+      if (token.entity_type !== 'player' || !token.entity_id) continue;
+      const char = Characters.campaignCharacters?.find((c) => c.id === token.entity_id);
+      if (!char) continue;
+      const hpMax = parseInt(token.hp_max, 10) || 0;
+      if (hpMax > 0) {
+        char.max_hp = hpMax;
+        char.current_hp = parseInt(token.hp_current, 10) ?? char.current_hp;
+      }
+    }
   },
 
   scheduleRender() {
@@ -580,9 +1072,7 @@ const BattleMap = {
       cancelAnimationFrame(this._renderRaf);
       this._renderRaf = null;
     }
-    const gs = this.settings.grid_size;
-    const w = this.settings.grid_width * gs;
-    const h = this.settings.grid_height * gs;
+    const { w, h } = this.mapPixelSize();
 
     if (this.canvas.width !== w) this.canvas.width = w;
     if (this.canvas.height !== h) this.canvas.height = h;
@@ -605,43 +1095,46 @@ const BattleMap = {
     ctx.fillRect(0, 0, w, h);
 
     if (this.backgroundImageObj) {
-      ctx.drawImage(this.backgroundImageObj, 0, 0, w, h);
+      const bg = this.backgroundPixelSize();
+      if (bg) {
+        ctx.drawImage(this.backgroundImageObj, 0, 0, bg.w, bg.h);
+      }
     }
 
-    this.drawMovementTrails(ctx, gs);
-    this.drawGrid(ctx, w, h, gs);
+    this.drawMovementTrails(ctx);
+    this.drawGrid(ctx, w, h);
 
     if (typeof MapZones !== 'undefined') {
-      MapZones.draw(ctx, gs);
+      MapZones.draw(ctx);
     }
 
     if (fogEnabled && isDm) {
-      this.drawDmFogPreview(ctx, gs, w, h);
+      this.drawDmFogPreview(ctx, w, h);
     }
 
     if (fogEnabled && !isDm) {
-      this.drawPlayerFog(ctx, gs, w, h);
+      this.drawPlayerFog(ctx, w, h);
     }
 
-    this.visiblePins().forEach((pin) => this.drawPin(ctx, pin, gs));
+    this.visiblePins().forEach((pin) => this.drawPin(ctx, pin));
     if (typeof MapCombat !== 'undefined') {
-      MapCombat.drawBlocking(ctx, gs);
-      MapCombat.drawRangeOverlay(ctx, gs);
+      MapCombat.drawBlocking(ctx);
+      MapCombat.drawRangeOverlay(ctx);
     }
-    this.visibleTokens().forEach((token) => this.drawToken(ctx, token, gs));
+    this.visibleTokens().forEach((token) => this.drawToken(ctx, token));
 
-    this.drawMeasureLine(ctx, gs);
+    this.drawMeasureLine(ctx);
     this.drawPointers(ctx);
-    this.drawFogEditOverlay(ctx, gs);
+    this.drawFogEditOverlay(ctx);
     if (typeof MapCombat !== 'undefined') MapCombat.drawEffects(ctx);
   },
 
   focusToken(tokenId) {
     const token = this.tokens.find((t) => t.id === tokenId);
     if (!token || !this.viewport) return;
-    const gs = this.settings?.grid_size || 40;
-    const cx = (token.x + (token.size || 1) / 2) * gs * this.zoom;
-    const cy = (token.y + (token.size || 1) / 2) * gs * this.zoom;
+    const { gsW, gsH, ox, oy } = this.gridMetrics();
+    const cx = (ox + (token.x + (token.size || 1) / 2) * gsW) * this.zoom;
+    const cy = (oy + (token.y + (token.size || 1) / 2) * gsH) * this.zoom;
     this.viewport.scrollLeft = Math.max(0, cx - this.viewport.clientWidth / 2);
     this.viewport.scrollTop = Math.max(0, cy - this.viewport.clientHeight / 2);
   },
@@ -682,37 +1175,47 @@ const BattleMap = {
     this.render();
   },
 
-  drawGrid(ctx, w, h, gs) {
+  drawGrid(ctx, w, h) {
     const raw = this.settings.grid_opacity;
     const opacityPct = raw === undefined || raw === null ? 100 : parseInt(raw, 10);
     if (opacityPct <= 0) return;
 
+    const { gsW, gsH, ox, oy } = this.gridMetrics();
+    const aligning = this.toolMode === 'grid-align' || !!this._gridAlignDrag;
     const alpha = Math.max(0, Math.min(100, opacityPct)) / 100;
-    ctx.strokeStyle = `rgba(201, 162, 39, ${0.12 * alpha})`;
-    ctx.lineWidth = 1;
-    for (let x = 0; x <= w; x += gs) {
+    const lineAlpha = (aligning ? 0.35 : 0.12) * alpha;
+    ctx.strokeStyle = `rgba(201, 162, 39, ${lineAlpha})`;
+    ctx.lineWidth = aligning ? 1.5 : 1;
+    const startX = ox - Math.ceil(Math.max(0, -ox) / gsW) * gsW;
+    const startY = oy - Math.ceil(Math.max(0, -oy) / gsH) * gsH;
+    for (let x = startX; x <= w + gsW; x += gsW) {
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, h);
       ctx.stroke();
     }
-    for (let y = 0; y <= h; y += gs) {
+    for (let y = startY; y <= h + gsH; y += gsH) {
       ctx.beginPath();
       ctx.moveTo(0, y);
       ctx.lineTo(w, y);
       ctx.stroke();
     }
-    ctx.fillStyle = `rgba(201, 178, 140, ${0.35 * alpha})`;
+    ctx.fillStyle = `rgba(201, 178, 140, ${(aligning ? 0.55 : 0.35) * alpha})`;
     ctx.font = '10px Crimson Pro, Georgia, serif';
-    for (let x = 0; x < this.settings.grid_width; x++) {
-      ctx.fillText(String.fromCharCode(65 + (x % 26)), x * gs + 3, 12);
+    for (let gx = 0; gx < this.settings.grid_width; gx++) {
+      const px = ox + gx * gsW;
+      if (px + gsW < 0 || px > w) continue;
+      ctx.fillText(String.fromCharCode(65 + (gx % 26)), px + 3, Math.max(12, oy + 12));
     }
-    for (let y = 0; y < this.settings.grid_height; y++) {
-      ctx.fillText((y + 1).toString(), 3, y * gs + gs - 3);
+    for (let gy = 0; gy < this.settings.grid_height; gy++) {
+      const py = oy + gy * gsH;
+      if (py + gsH < 0 || py > h) continue;
+      ctx.fillText((gy + 1).toString(), Math.max(3, ox + 3), py + gsH - 3);
     }
   },
 
-  drawPlayerFog(ctx, gs, w, h) {
+  drawPlayerFog(ctx, w, h) {
+    const { w: cw, h: ch } = this.cellSizePx();
     ctx.fillStyle = 'rgba(10, 6, 4, 0.88)';
     ctx.fillRect(0, 0, w, h);
     ctx.globalCompositeOperation = 'destination-out';
@@ -720,37 +1223,42 @@ const BattleMap = {
     for (const key of this.fogRevealed) {
       const [x, y] = key.split(',').map(Number);
       if (!Number.isNaN(x) && !Number.isNaN(y)) {
-        ctx.fillRect(x * gs, y * gs, gs, gs);
+        const tl = this.cellTopLeftPx(x, y);
+        ctx.fillRect(tl.x, tl.y, cw, ch);
       }
     }
     ctx.globalCompositeOperation = 'source-over';
   },
 
-  drawDmFogPreview(ctx, gs, w, h) {
+  drawDmFogPreview(ctx, w, h) {
+    const { w: cw, h: ch } = this.cellSizePx();
     ctx.fillStyle = 'rgba(10, 6, 4, 0.55)';
     for (let y = 0; y < this.settings.grid_height; y++) {
       for (let x = 0; x < this.settings.grid_width; x++) {
         const key = `${x},${y}`;
         if (!this.fogRevealed.has(key)) {
-          ctx.fillRect(x * gs, y * gs, gs, gs);
+          const tl = this.cellTopLeftPx(x, y);
+          ctx.fillRect(tl.x, tl.y, cw, ch);
         }
       }
     }
   },
 
-  drawFogEditOverlay(ctx, gs) {
+  drawFogEditOverlay(ctx) {
     if (!this.isDm() || !this.settings.fog_enabled) return;
     if (this.toolMode !== 'fog-reveal' && this.toolMode !== 'fog-hide') return;
+    const { w: cw, h: ch } = this.cellSizePx();
     ctx.strokeStyle = 'rgba(201, 162, 39, 0.35)';
     ctx.setLineDash([3, 3]);
     for (const key of this.fogRevealed) {
       const [x, y] = key.split(',').map(Number);
-      ctx.strokeRect(x * gs + 1, y * gs + 1, gs - 2, gs - 2);
+      const tl = this.cellTopLeftPx(x, y);
+      ctx.strokeRect(tl.x + 1, tl.y + 1, cw - 2, ch - 2);
     }
     ctx.setLineDash([]);
   },
 
-  drawMovementTrails(ctx, gs) {
+  drawMovementTrails(ctx) {
     if (!this.settings.trails_enabled) return;
     ctx.save();
     ctx.setLineDash([6, 6]);
@@ -761,8 +1269,9 @@ const BattleMap = {
       ctx.strokeStyle = token?.color ? `${token.color}99` : 'rgba(201, 162, 39, 0.55)';
       ctx.beginPath();
       path.forEach((pt, i) => {
-        const px = pt.x * gs + gs / 2;
-        const py = pt.y * gs + gs / 2;
+        const c = this.cellCenterPx(pt.x, pt.y);
+        const px = c.x;
+        const py = c.y;
         if (i === 0) ctx.moveTo(px, py);
         else ctx.lineTo(px, py);
       });
@@ -773,16 +1282,20 @@ const BattleMap = {
     this.localTrailSegments.forEach((seg) => {
       ctx.strokeStyle = 'rgba(201, 162, 39, 0.7)';
       ctx.beginPath();
-      ctx.moveTo(seg.fromX * gs + gs / 2, seg.fromY * gs + gs / 2);
-      ctx.lineTo(seg.toX * gs + gs / 2, seg.toY * gs + gs / 2);
+      const from = this.cellCenterPx(seg.fromX, seg.fromY);
+      const to = this.cellCenterPx(seg.toX, seg.toY);
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
       ctx.stroke();
     });
     ctx.restore();
   },
 
-  drawPin(ctx, pin, gs) {
-    const px = pin.x * gs + gs / 2;
-    const py = pin.y * gs + gs / 2;
+  drawPin(ctx, pin) {
+    const center = this.cellCenterPx(pin.x, pin.y);
+    const px = center.x;
+    const py = center.y;
+    const { gsH } = this.gridMetrics();
     const meta = MAP_PIN_TYPES[pin.pin_type] || MAP_PIN_TYPES.note;
     const selected = pin.id === this.selectedPinId;
 
@@ -805,18 +1318,20 @@ const BattleMap = {
       ctx.fillStyle = '#f5efe4';
       ctx.strokeStyle = 'rgba(0,0,0,0.6)';
       ctx.lineWidth = 3;
-      ctx.strokeText(pin.label, px, py + gs * 0.55);
-      ctx.fillText(pin.label, px, py + gs * 0.55);
+      ctx.strokeText(pin.label, px, py + gsH * 0.55);
+      ctx.fillText(pin.label, px, py + gsH * 0.55);
     }
   },
 
-  drawMeasureLine(ctx, gs) {
+  drawMeasureLine(ctx) {
     if (!this.measureStart) return;
     const end = this.measureEnd || this.measureStart;
-    const x1 = this.measureStart.x * gs + gs / 2;
-    const y1 = this.measureStart.y * gs + gs / 2;
-    const x2 = end.x * gs + gs / 2;
-    const y2 = end.y * gs + gs / 2;
+    const c1 = this.cellCenterPx(this.measureStart.x, this.measureStart.y);
+    const c2 = this.cellCenterPx(end.x, end.y);
+    const x1 = c1.x;
+    const y1 = c1.y;
+    const x2 = c2.x;
+    const y2 = c2.y;
     const dist = Math.max(Math.abs(end.x - this.measureStart.x), Math.abs(end.y - this.measureStart.y));
     const feet = dist * 5;
 
@@ -860,11 +1375,11 @@ const BattleMap = {
     });
   },
 
-  drawHpBar(ctx, token, stats, tx, ty, size, gs) {
+  drawHpBar(ctx, token, stats, tx, ty, sizeW, sizeH, gs) {
     if (!stats || stats.hpMax <= 0) return;
     const ratio = Math.max(0, Math.min(1, stats.hpCurrent / stats.hpMax));
-    const barH = Math.max(7, Math.round(gs * 0.18));
-    const barW = size - 6;
+    const barH = Math.max(7, Math.round(Math.min(sizeH, gs) * 0.18));
+    const barW = sizeW - 6;
     const barX = tx + 3;
     const aboveY = ty - barH - 3;
     const barY = aboveY >= 0 ? aboveY : ty + 2;
@@ -917,16 +1432,19 @@ const BattleMap = {
     ctx.closePath();
   },
 
-  drawToken(ctx, token, gs) {
-    const tx = token.x * gs;
-    const ty = token.y * gs;
-    const size = (token.size || 1) * gs;
-    const cx = tx + size / 2;
-    const cy = ty + size / 2;
-    const radius = (size / 2) - 3;
+  drawToken(ctx, token) {
+    const { gsW, gsH, gs } = this.gridMetrics();
+    const tl = this.cellTopLeftPx(token.x, token.y);
+    const tx = tl.x;
+    const ty = tl.y;
+    const sizeW = (token.size || 1) * gsW;
+    const sizeH = (token.size || 1) * gsH;
+    const cx = tx + sizeW / 2;
+    const cy = ty + sizeH / 2;
+    const radius = Math.min(sizeW, sizeH) / 2 - 3;
 
     const stats = this.getTokenStats(token);
-    this.drawHpBar(ctx, token, stats, tx, ty, size, gs);
+    this.drawHpBar(ctx, token, stats, tx, ty, sizeW, sizeH, gs);
 
     const img = token.image_url ? this.tokenImageCache.get(token.image_url) : null;
     if (img) {
@@ -935,7 +1453,7 @@ const BattleMap = {
       ctx.arc(cx, cy, radius, 0, Math.PI * 2);
       ctx.closePath();
       ctx.clip();
-      ctx.drawImage(img, tx + 3, ty + 3, size - 6, size - 6);
+      ctx.drawImage(img, tx + 3, ty + 3, sizeW - 6, sizeH - 6);
       ctx.restore();
       ctx.beginPath();
       ctx.arc(cx, cy, radius, 0, Math.PI * 2);
@@ -959,8 +1477,9 @@ const BattleMap = {
     const name = token.entity_name || '?';
     const shortName = name.length > 5 ? name.substring(0, 5) : name;
     if (!img) ctx.fillText(shortName, cx, cy);
-    else ctx.fillText(shortName, cx, ty + size - 8);
-    if (typeof MapProps !== 'undefined') MapProps.drawTokenOverlay(ctx, token, gs);
+    else ctx.fillText(shortName, cx, ty + sizeH - 8);
+    if (typeof MapProps !== 'undefined') MapProps.drawTokenOverlay(ctx, token);
+    if (typeof MapConditions !== 'undefined') MapConditions.drawForToken(ctx, token);
     ctx.textAlign = 'start';
     ctx.textBaseline = 'alphabetic';
 
@@ -972,7 +1491,7 @@ const BattleMap = {
     if (token.entity_type === 'npc' || token.entity_type === 'monster') {
       ctx.fillStyle = 'rgba(166, 61, 47, 0.85)';
       ctx.beginPath();
-      ctx.arc(tx + size - 6, ty + 6, 5, 0, Math.PI * 2);
+      ctx.arc(tx + sizeW - 6, ty + 6, 5, 0, Math.PI * 2);
       ctx.fill();
     }
 
@@ -994,7 +1513,7 @@ const BattleMap = {
       if (isEnemy) {
         ctx.strokeStyle = 'rgba(166, 61, 47, 0.7)';
         ctx.lineWidth = 2;
-        ctx.strokeRect(tx + 1, ty + 1, size - 2, size - 2);
+        ctx.strokeRect(tx + 1, ty + 1, sizeW - 2, sizeH - 2);
       }
     }
   },
@@ -1007,9 +1526,9 @@ const BattleMap = {
   },
 
   cellAt(mx, my) {
-    const gs = this.settings.grid_size;
-    const x = Math.floor(mx / gs);
-    const y = Math.floor(my / gs);
+    const { gsW, gsH, ox, oy } = this.gridMetrics();
+    const x = Math.floor((mx - ox) / gsW);
+    const y = Math.floor((my - oy) / gsH);
     return { x, y, key: `${x},${y}` };
   },
 
@@ -1036,25 +1555,25 @@ const BattleMap = {
   },
 
   getTokenAt(mx, my) {
-    const gs = this.settings.grid_size;
+    const { gsW, gsH } = this.gridMetrics();
     const list = this.visibleTokens();
     for (let i = list.length - 1; i >= 0; i--) {
       const t = list[i];
-      const size = (t.size || 1) * gs;
-      const tx = t.x * gs;
-      const ty = t.y * gs;
-      if (mx >= tx && mx < tx + size && my >= ty && my < ty + size) return t;
+      const sizeW = (t.size || 1) * gsW;
+      const sizeH = (t.size || 1) * gsH;
+      const tl = this.cellTopLeftPx(t.x, t.y);
+      if (mx >= tl.x && mx < tl.x + sizeW && my >= tl.y && my < tl.y + sizeH) return t;
     }
     return null;
   },
 
   getPinAt(mx, my) {
-    const gs = this.settings.grid_size;
+    const { gsW, gsH } = this.gridMetrics();
+    const hitR = Math.min(gsW, gsH) * 0.45;
     for (let i = this.visiblePins().length - 1; i >= 0; i--) {
       const p = this.visiblePins()[i];
-      const px = p.x * gs + gs / 2;
-      const py = p.y * gs + gs / 2;
-      if (Math.hypot(mx - px, my - py) < gs * 0.45) return p;
+      const c = this.cellCenterPx(p.x, p.y);
+      if (Math.hypot(mx - c.x, my - c.y) < hitR) return p;
     }
     return null;
   },
@@ -1070,6 +1589,11 @@ const BattleMap = {
 
     if (e.altKey || this.toolMode === 'pointer') {
       this.emitPointer(cell);
+      return;
+    }
+
+    if (this.isGridAlignMode(e)) {
+      this.startGridAlignDrag(mx, my, e);
       return;
     }
 
@@ -1147,7 +1671,7 @@ const BattleMap = {
         this.render();
         return;
       }
-      const gs = this.settings.grid_size;
+      const { gsW, gsH, ox, oy } = this.gridMetrics();
       const char = this.getCharacterForToken(token);
       const isOwnToken = char && char.user_id === getUser()?.id;
       const canDrag = this.isDm() || isOwnToken;
@@ -1165,8 +1689,8 @@ const BattleMap = {
         } else {
           this.dragMaxFt = null;
         }
-        this.dragOffset.x = mx - token.x * gs;
-        this.dragOffset.y = my - token.y * gs;
+        this.dragOffset.x = mx - (ox + token.x * gsW);
+        this.dragOffset.y = my - (oy + token.y * gsH);
         this.isDragging = true;
       }
       this.render();
@@ -1180,6 +1704,8 @@ const BattleMap = {
 
   onMouseMove(e) {
     const { mx, my } = this.canvasCoords(e);
+
+    if (this._gridAlignDrag) return;
 
     if (this.isPaintingFog) {
       this.paintFogAt(mx, my, this.toolMode === 'fog-reveal');
@@ -1214,13 +1740,13 @@ const BattleMap = {
     }
 
     if (!this.isDragging || !this.dragToken) return;
-    const gs = this.settings.grid_size;
+    const { gsW, gsH, ox, oy } = this.gridMetrics();
     const maxX = this.settings.grid_width - (this.dragToken.size || 1);
     const maxY = this.settings.grid_height - (this.dragToken.size || 1);
     let nx = Math.max(0, Math.min(maxX,
-      Math.floor((mx - this.dragOffset.x + gs / 2) / gs)));
+      Math.floor((mx - this.dragOffset.x - ox + gsW / 2) / gsW)));
     let ny = Math.max(0, Math.min(maxY,
-      Math.floor((my - this.dragOffset.y + gs / 2) / gs)));
+      Math.floor((my - this.dragOffset.y - oy + gsH / 2) / gsH)));
 
     if (this.dragMaxFt != null && this.dragStartX != null && typeof MapTactics !== 'undefined') {
       let clamped;
@@ -1240,6 +1766,10 @@ const BattleMap = {
   },
 
   onMouseUp(e) {
+    if (this._gridAlignDrag) {
+      this.finishGridAlignDrag();
+      return;
+    }
     if (this.isPaintingFog) {
       this.isPaintingFog = false;
       return;
@@ -1314,9 +1844,9 @@ const BattleMap = {
   scrollToPin(pinId) {
     const pin = this.pins.find((p) => p.id === pinId);
     if (!pin || !this.viewport) return;
-    const gs = this.settings.grid_size;
-    const x = pin.x * gs * this.zoom;
-    const y = pin.y * gs * this.zoom;
+    const c = this.cellCenterPx(pin.x, pin.y);
+    const x = c.x * this.zoom;
+    const y = c.y * this.zoom;
     this.viewport.scrollTo({ left: x - 80, top: y - 80, behavior: 'smooth' });
   },
 
@@ -1489,7 +2019,7 @@ const BattleMap = {
     const propLine = isProp ? ', 7 = aktywuj efekt rekwizytu' : '';
     const action = prompt(
       `Token: ${token.entity_name}${isProp ? '\n' + MapProps.displayHint(token) : ''}\n` +
-      `1 = usuń, 2 = zablokuj/odblokuj, 3 = grafika, 4 = powiąż postać/NPC, 5 = statystyki, 6 = inicjatywa${propLine}`,
+      `1 = usuń, 2 = zablokuj/odblokuj, 3 = grafika, 4 = powiąż postać/NPC, 5 = statystyki, 6 = inicjatywa, 8 = stany${propLine}`,
       ''
     );
     if (action === '1') {
@@ -1526,6 +2056,8 @@ const BattleMap = {
     } else if (action === '7' && isProp && this.isDm()) {
       App.socket?.emit('map-trigger-prop', { tokenId: token.id });
       showToast('Aktywowano rekwizyt', 'info');
+    } else if (action === '8') {
+      if (typeof MapConditions !== 'undefined') MapConditions.openDialog(token);
     }
   },
 

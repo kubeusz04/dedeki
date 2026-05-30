@@ -116,11 +116,22 @@
             <button class="session-tab" data-panel="map-panel">🗺️ Mapa</button>
             <button class="session-tab" data-panel="initiative-panel">⚔️ Inicjatywa</button>
             <button class="session-tab" data-panel="notes-panel">📝 Notatki</button>
+            <button class="session-tab" data-panel="world-calendar-panel">📅 Kalendarz</button>
+            <button class="session-tab" data-panel="quests-panel">📜 Questy</button>
+            <button class="session-tab" data-panel="handouts-panel">🔒 Handouty</button>
             <button class="session-tab" data-panel="dice-panel">🎲 Kości</button>
+            <button class="session-tab" data-panel="spellbook-panel">📖 Spellbook</button>
+            <button class="session-tab" data-panel="soundboard-panel">🔊 Soundboard</button>
+            <button class="session-tab" data-panel="campaign-music-panel">🎵 Muzyka</button>
+            <button class="session-tab dm-only-tab" data-panel="dm-economy-panel">💰 Ekonomia</button>
+            <button class="session-tab dm-only-tab" data-panel="random-tables-panel">🧞 Losowe Tabele</button>
+            <button class="session-tab dm-only-tab" data-panel="bestiary-panel">🎯 Bestiariusz</button>
+            <button class="session-tab dm-only-tab" data-panel="npc-generator-panel">🎭 Generator NPC</button>
             <button class="session-tab dm-only-tab" data-panel="dm-panel">👑 MG Panel</button>
           </div>
         </div>
         <div class="header-right">
+          <div id="world-state-hud" class="world-state-hud-container"></div>
           <div id="online-users-indicator" class="online-indicator">
             <span class="online-dot"></span>
             <span id="online-count">0</span> online
@@ -140,6 +151,9 @@
               </div>
             </div>
             <div class="chat-main">
+              <div class="chat-toolbar dm-only">
+                <button type="button" id="btn-clear-chat" class="btn btn-sm btn-danger" title="Usuń całą historię czatu kampanii (nieodwracalne)">🗑️ Wyczyść czat</button>
+              </div>
               <div id="chat-messages" class="chat-messages"></div>
               <button type="button" id="btn-load-older-chat" class="btn btn-sm btn-secondary hidden" style="margin-top:8px;">Wczytaj starsze wiadomości</button>
               <div class="chat-input-area">
@@ -174,6 +188,7 @@
                   <button class="dice-btn" data-dice="d20">d20</button>
                   <button class="dice-btn d100" data-dice="d100">d100</button>
                 </div>
+                <button type="button" id="btn-dm-group-roll" class="btn btn-sm btn-primary dm-only chat-group-roll-btn" title="Wszyscy gracze rzucają jednocześnie — wynik w czacie">🎯 Rzut grupowy</button>
               </div>
               <div class="sidebar-section">
                 <h4>👥 Online</h4>
@@ -193,6 +208,13 @@
               <button id="btn-import-character" class="btn btn-secondary">📥 Importuj</button>
             </div>
           </div>
+          <section id="dm-party-overview-section" class="dm-party-overview-section dm-only" aria-label="Skrót postaci graczy — tylko MG">
+            <div class="dm-party-overview-head">
+              <h3 class="dm-party-overview-title">📊 Postacie Graczy — Skrót</h3>
+              <button type="button" id="dm-insp-grant-all" class="btn btn-xs btn-primary" title="Daj +1 Inspiracji każdemu graczowi">⭐ Daj wszystkim +1</button>
+            </div>
+            <div id="dm-party-overview" class="party-overview"></div>
+          </section>
           <div id="campaign-characters" class="characters-grid"></div>
         </div>
 
@@ -223,6 +245,7 @@
                   <button type="button" class="map-tool-btn dm-only" data-map-tool="terrain-paint" title="Maluj teren (trudny, lód…)">🏔️</button>
                   <button type="button" class="map-tool-btn dm-only" data-map-tool="terrain-erase" title="Gumka terenu">🏔️−</button>
                   <button type="button" class="map-tool-btn dm-only" data-map-tool="zone-square" title="Strefa kwadratowa">▢</button>
+                  <button type="button" class="map-tool-btn dm-only" data-map-tool="grid-align" title="Dopasuj siatkę do tła: przeciągnij = przesuń, Ctrl+przeciągnij = rozstaw linii, kółko = skala">⊞</button>
                   <button type="button" class="btn btn-sm btn-secondary dm-only" id="btn-map-place-prop" type="button" title="Postaw rekwizyt (beczka, skrzynia…)">📦</button>
                 </div>
                 <div class="map-tool-group map-tool-group-dm dm-only">
@@ -253,9 +276,29 @@
                       <option value="2160">4K 2160p (120 px/kratka)</option>
                     </select>
                   </label>
-                  <label class="map-grid-label dm-only" title="Rozmiar pojedynczej kratki w pikselach">Siatka
-                    <input type="number" id="map-grid-size" value="60" min="20" max="200" class="input-sm">
-                  </label>
+                  <div class="map-grid-align dm-only" title="Dopasowanie linii siatki do mapy JPG/PNG">
+                    <span class="map-grid-align__label">Siatka</span>
+                    <p class="map-grid-align__hint">⊞: przeciągnij · Ctrl+przeciągnij · kółko myszy</p>
+                    <label class="map-grid-label" title="Szerokość między pionowymi liniami (px)">
+                      Szer. <input type="number" id="map-grid-cell-width" value="60" min="20" max="200" step="1" class="input-sm map-grid-offset-input">
+                    </label>
+                    <label class="map-grid-label" title="Wysokość między poziomymi liniami (px)">
+                      Wys. <input type="number" id="map-grid-cell-height" value="60" min="20" max="200" step="1" class="input-sm map-grid-offset-input">
+                    </label>
+                    <div class="map-grid-align__nudge" role="group" aria-label="Przesuń siatkę">
+                      <button type="button" class="btn btn-sm btn-secondary map-grid-nudge" data-grid-nudge="0,-1" title="W górę">↑</button>
+                      <button type="button" class="btn btn-sm btn-secondary map-grid-nudge" data-grid-nudge="-1,0" title="W lewo">←</button>
+                      <button type="button" class="btn btn-sm btn-secondary map-grid-nudge" data-grid-nudge="1,0" title="W prawo">→</button>
+                      <button type="button" class="btn btn-sm btn-secondary map-grid-nudge" data-grid-nudge="0,1" title="W dół">↓</button>
+                    </div>
+                    <label class="map-grid-label" title="Przesunięcie siatki w px (X)">
+                      X <input type="number" id="map-grid-offset-x" value="0" step="1" class="input-sm map-grid-offset-input">
+                    </label>
+                    <label class="map-grid-label" title="Przesunięcie siatki w px (Y)">
+                      Y <input type="number" id="map-grid-offset-y" value="0" step="1" class="input-sm map-grid-offset-input">
+                    </label>
+                    <button type="button" id="btn-grid-offset-reset" class="btn btn-sm btn-secondary" title="Wyzeruj przesunięcie (X/Y)">0</button>
+                  </div>
                   <label class="map-grid-label map-grid-opacity-label dm-only" title="Przezroczystość linii i etykiet siatki">
                     Widoczność siatki
                     <span class="map-grid-opacity-wrap">
@@ -546,68 +589,74 @@
           </div>
         </div>
 
+        <!-- Quests Panel -->
+        <div id="quests-panel" class="session-panel">
+          <div id="quests-panel-root" class="quests-panel-root"></div>
+        </div>
+
+        <!-- World calendar / weather panel -->
+        <div id="world-calendar-panel" class="session-panel">
+          <div id="world-calendar-panel-root" class="world-calendar-panel-root"></div>
+        </div>
+
+        <!-- Handouts Panel -->
+        <div id="handouts-panel" class="session-panel">
+          <div id="handouts-panel-root" class="handouts-panel-root"></div>
+        </div>
+
+        <!-- Spellbook Panel -->
+        <div id="spellbook-panel" class="session-panel">
+          <div id="spellbook-panel-root" class="spellbook-panel-root"></div>
+        </div>
+
+        <!-- Soundboard Panel -->
+        <div id="soundboard-panel" class="session-panel">
+          <div id="soundboard-panel-root" class="soundboard-dj-root"></div>
+        </div>
+
+        <!-- Campaign music panel -->
+        <div id="campaign-music-panel" class="session-panel">
+          <div id="campaign-music-panel-root" class="campaign-music-panel-root"></div>
+        </div>
+
+        <!-- DM Economy Panel -->
+        <div id="dm-economy-panel" class="session-panel dm-only-panel">
+          <div id="dm-economy-panel-root" class="dm-economy-panel-root"></div>
+        </div>
+
+        <!-- Random Tables Panel (Genie) -->
+        <div id="random-tables-panel" class="session-panel dm-only-panel">
+          <div id="random-tables-panel-root" class="random-tables-panel-root"></div>
+        </div>
+
+        <!-- Bestiary Panel -->
+        <div id="bestiary-panel" class="session-panel dm-only-panel">
+          <div id="bestiary-panel-root" class="bestiary-panel-root"></div>
+        </div>
+
+        <!-- NPC Generator Panel -->
+        <div id="npc-generator-panel" class="session-panel dm-only-panel">
+          <div id="npc-generator-panel-root" class="npc-gen-panel-root"></div>
+        </div>
+
         <!-- DM Panel -->
         <div id="dm-panel" class="session-panel">
           <div class="panel-header">
             <h2>👑 Panel Mistrza Gry</h2>
+            <div class="panel-header-actions">
+              <button type="button" id="btn-export-campaign" class="btn btn-sm btn-secondary" title="Eksport kampanii: JSON lub pełny ZIP">💾 Eksport / Backup</button>
+            </div>
           </div>
           <div class="dm-panel-content">
             <div class="dm-section dm-section-wide">
               <h3>📋 Info o Kampanii</h3>
               <div id="dm-campaign-info" class="dm-info-box"></div>
             </div>
-            <div class="dm-section">
-              <h3>🧙 NPC</h3>
-              <button id="btn-create-npc" class="btn btn-primary">➕ Szablony NPC / Potworów</button>
-              <div id="npc-list" class="npc-list"></div>
-            </div>
-            <div class="dm-section">
-              <h3>💰 Ekonomia i handel</h3>
-              <div id="dm-economy-summary" class="dm-info-box" style="margin-bottom:8px;"></div>
-              <div class="dm-tools">
-                <button type="button" id="btn-dm-economy" class="btn btn-primary">🏪 Handlarze i łup</button>
-                <button type="button" id="btn-dm-merchant-quick" class="btn btn-secondary">➕ Handlarz</button>
-                <button type="button" id="btn-dm-loot-quick" class="btn btn-secondary">🎁 Wyślij łup</button>
-                <button type="button" id="btn-dm-custom-item-quick" class="btn btn-success">🛠️ Własny przedmiot</button>
-              </div>
-            </div>
-            <div class="dm-section dm-section-wide">
-              <h3>🎵 Muzyka sesji</h3>
-              <div id="dm-music-panel" class="dm-music-panel"></div>
-            </div>
-            <div class="dm-section">
-              <h3>🎯 Szybkie Narzędzia MG</h3>
-              <div class="dm-tools">
-                <button id="btn-dm-roll-table" class="btn btn-secondary">🎲 Losowa Tabela</button>
-                <button id="btn-dm-conditions" class="btn btn-secondary">📋 Stany</button>
-                <button id="btn-dm-rules-ref" class="btn btn-secondary">📖 Zasady</button>
-              </div>
-            </div>
-            <div class="dm-section">
-              <h3>📊 Postacie Graczy - Skrót</h3>
-              <div id="dm-party-overview" class="party-overview"></div>
-            </div>
           </div>
         </div>
       </div>
 
-      <div id="campaign-music-bar" class="campaign-music-bar hidden" aria-label="Odtwarzacz muzyki sesji">
-        <div class="music-bar-main">
-          <span id="music-track-title" class="music-track-title">—</span>
-          <div class="music-bar-controls">
-            <button type="button" id="music-play-btn" class="btn btn-sm btn-secondary" data-music-action="play" title="Odtwórz / pauza" disabled>▶</button>
-            <button type="button" id="music-stop-btn" class="btn btn-sm btn-secondary" data-music-action="stop" title="Stop">⏹</button>
-            <span id="music-time-current" class="music-time">0:00</span>
-            <input type="range" id="music-seek" class="music-seek" min="0" max="100" value="0" disabled>
-            <span id="music-time-duration" class="music-time">0:00</span>
-          </div>
-        </div>
-        <div class="music-bar-volume">
-          <button type="button" id="music-mute-btn" class="btn btn-sm btn-secondary" data-music-action="mute" title="Wycisz">🔊</button>
-          <input type="range" id="music-volume" class="music-volume" min="0" max="100" value="70" title="Głośność (lokalna)">
-        </div>
-      </div>
-      <audio id="campaign-music-audio" preload="metadata"></audio>
+      <audio id="campaign-music-audio" preload="metadata" class="sr-only-input" aria-hidden="true"></audio>
     </div>
 
     <!-- Character Sheet Modal -->
@@ -655,17 +704,6 @@
       </div>
     </div>
 
-    <!-- Conditions Reference Modal -->
-    <div id="conditions-modal" class="modal">
-      <div class="modal-content modal-lg">
-        <div class="modal-header">
-          <h2>📋 Stany (Conditions)</h2>
-          <button class="modal-close">&times;</button>
-        </div>
-        <div class="modal-body" id="conditions-modal-body"></div>
-      </div>
-    </div>
-
     <!-- Toast notifications -->
     <div id="toast-container"></div>
     <input type="file" id="char-import-file" accept=".json,application/json" class="sr-only-input" tabindex="-1">
@@ -677,6 +715,16 @@
   <script src="/js/dnd5e-rules.js"></script>
   <script src="/js/dnd5e-subclasses.js"></script>
   <script src="/js/dnd5e-spells.js"></script>
+  <script src="/js/dnd5e-class-resources.js"></script>
+  <script src="/js/spellbook.js"></script>
+  <script src="/js/inspiration.js"></script>
+  <script src="/js/bestiary.js"></script>
+  <script src="/js/npc-generator.js"></script>
+  <script src="/js/quests.js"></script>
+  <script src="/js/handouts.js"></script>
+  <script src="/js/world-state.js"></script>
+  <script src="/js/export.js"></script>
+  <script src="/js/soundboard.js"></script>
   <script src="/js/auth.js"></script>
   <script src="/js/campaigns.js"></script>
   <script src="/js/characters.js"></script>
@@ -690,6 +738,7 @@
   <script src="/js/map-zones.js"></script>
   <script src="/js/map-prop-templates.js"></script>
   <script src="/js/map-props.js"></script>
+  <script src="/js/map-conditions.js"></script>
   <script src="/js/map-range.js"></script>
   <script src="/js/map-los.js"></script>
   <script src="/js/map-combat.js"></script>
@@ -702,7 +751,11 @@
   <script src="/js/dnd-npc-templates.js"></script>
   <script src="/js/economy.js"></script>
   <script src="/js/dm-economy.js"></script>
+  <script src="/js/dnd-random-tables.js"></script>
+  <script src="/js/ai-suggest.js"></script>
+  <script src="/js/random-tables.js"></script>
   <script src="/js/token-library.js"></script>
+  <script src="/js/group-rolls.js"></script>
   <script src="/js/dm-panel.js"></script>
   <script src="/js/app.js"></script>
 </body>

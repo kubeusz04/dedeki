@@ -139,7 +139,6 @@ const MapFullscreen = {
       'character-modal',
       'shop-modal',
       'loot-modal',
-      'conditions-modal',
       'toast-container',
     ];
   },

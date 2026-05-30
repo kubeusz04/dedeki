@@ -1,10 +1,9 @@
 // ===== DM Panel Module =====
 const DMPanel = {
   init() {
-    document.getElementById('btn-create-npc').addEventListener('click', () => this.showCreateNpcDialog());
-    document.getElementById('btn-dm-conditions').addEventListener('click', () => this.showConditions());
-    document.getElementById('btn-dm-rules-ref').addEventListener('click', () => this.showRulesReference());
-    document.getElementById('btn-dm-roll-table').addEventListener('click', () => this.showRandomTables());
+    document.getElementById('npc-generator-panel-root')?.addEventListener('click', (e) => {
+      if (e.target.closest('#btn-create-npc')) this.showCreateNpcDialog();
+    });
 
     const infoBox = document.getElementById('dm-campaign-info');
     if (infoBox) {
@@ -22,11 +21,69 @@ const DMPanel = {
   async load() {
     if (!App.currentCampaign || App.currentCampaign.role !== 'dm') return;
     await this.loadCampaignInfo();
-    this.loadNpcs();
-    this.loadPartyOverview();
-    if (typeof DMEconomy !== 'undefined') DMEconomy.load();
     if (typeof TokenLibrary !== 'undefined') TokenLibrary.load();
-    if (typeof CampaignMusic !== 'undefined') CampaignMusic.renderDmPanel();
+  },
+
+  onPanelActivate() {
+    if (!App.currentCampaign || App.currentCampaign.role !== 'dm') return;
+    this.loadCampaignInfo();
+  },
+
+  _campDaysSince(dateStr) {
+    if (!dateStr) return null;
+    const d = new Date(dateStr);
+    if (Number.isNaN(d.getTime())) return null;
+    return Math.max(0, Math.floor((Date.now() - d.getTime()) / 86400000));
+  },
+
+  _walletCopper(c) {
+    return (parseInt(c.copper, 10) || 0) + (parseInt(c.silver, 10) || 0) * 10
+      + (parseInt(c.electrum, 10) || 0) * 50 + (parseInt(c.gold, 10) || 0) * 100
+      + (parseInt(c.platinum, 10) || 0) * 1000;
+  },
+
+  _formatPartyWealth(cp) {
+    if (!cp) return '0 MZ';
+    const gp = Math.floor(cp / 100);
+    const rem = cp % 100;
+    if (gp >= 1000) return `~${(gp / 1000).toFixed(1)}k MZ`;
+    return rem ? `${gp} MZ + reszta` : `${gp} MZ`;
+  },
+
+  _worldSnapshot(ws) {
+    if (!ws) return null;
+    const WS = typeof WorldState !== 'undefined' ? WorldState : null;
+    const cal = WS?.CALENDARS?.[ws.calendar_type] || WS?.CALENDARS?.faerun;
+    const monthMeta = cal?.months?.[ws.month_index] || { pl: '—' };
+    const weatherMeta = WS?.WEATHER?.[ws.weather] || { icon: '🌤️', label: ws.weather || '—' };
+    const windMeta = WS?.WIND?.[ws.wind] || { label: ws.wind || '—' };
+    const tempMeta = WS?.TEMPERATURE?.[ws.temperature] || { pl: ws.temperature || '—' };
+    const tod = WS?.timeOfDayMeta ? WS.timeOfDayMeta(ws) : { icon: '⏰', label: '—' };
+    const season = WS?._seasonMeta
+      ? WS._seasonMeta(cal, ws.month_index)
+      : { icon: '📅', label: cal?.seasonForMonth?.(ws.month_index) || '—' };
+    const epoch = cal?.epoch ? ` ${cal.epoch}` : '';
+    const clock = WS?.formatClock ? WS.formatClock(ws) : '—';
+    const env = WS?.getEnvironmentalEffects ? WS.getEnvironmentalEffects(ws) : { reasons: [] };
+    return {
+      date: `${monthMeta.pl} ${ws.day}, ${ws.year}${epoch}`,
+      clock,
+      tod,
+      season,
+      weather: weatherMeta,
+      wind: windMeta,
+      temp: tempMeta,
+      envWarn: env.rangedDisadvantage || env.heavilyObscured,
+      envReasons: env.reasons || []
+    };
+  },
+
+  _statTile(val, lbl, mod = '') {
+    return `<div class="dm-camp-stat ${mod}"><span class="dm-stat-val">${val}</span><span class="dm-stat-lbl">${lbl}</span></div>`;
+  },
+
+  _statGroup(title, tiles) {
+    return `<section class="dm-stat-group"><h5 class="dm-stat-group__title">${title}</h5><div class="dm-camp-stats-grid">${tiles}</div></section>`;
   },
 
   async copyInviteCode() {
@@ -48,13 +105,40 @@ const DMPanel = {
     const campaignId = App.currentCampaign.id;
 
     try {
-      const [campaign, characters, npcs, notes, diceLog, mapData] = await Promise.all([
+      const [
+        campaign,
+        characters,
+        npcs,
+        notes,
+        diceLog,
+        mapData,
+        quests,
+        handouts,
+        worldState,
+        musicData,
+        sounds,
+        bestiary,
+        merchants,
+        lootTables,
+        tokenImages,
+        messages
+      ] = await Promise.all([
         apiFetch(`/campaigns/${campaignId}`),
         apiFetch(`/campaigns/${campaignId}/characters`),
         apiFetch(`/campaigns/${campaignId}/npcs`),
         apiFetch(`/campaigns/${campaignId}/notes`),
         apiFetch(`/campaigns/${campaignId}/dice-log`).catch(() => []),
-        apiFetch(`/campaigns/${campaignId}/map`).catch(() => null)
+        apiFetch(`/campaigns/${campaignId}/map`).catch(() => null),
+        apiFetch(`/campaigns/${campaignId}/quests`).catch(() => []),
+        apiFetch(`/campaigns/${campaignId}/handouts`).catch(() => []),
+        apiFetch(`/campaigns/${campaignId}/world-state`).catch(() => null),
+        apiFetch(`/campaigns/${campaignId}/music`).catch(() => ({ tracks: [], playback: null })),
+        apiFetch(`/campaigns/${campaignId}/sounds`).catch(() => []),
+        apiFetch(`/campaigns/${campaignId}/bestiary`).catch(() => []),
+        apiFetch(`/campaigns/${campaignId}/merchants`).catch(() => []),
+        apiFetch(`/campaigns/${campaignId}/loot-tables`).catch(() => []),
+        apiFetch(`/campaigns/${campaignId}/token-images`).catch(() => []),
+        apiFetch(`/campaigns/${campaignId}/messages?limit=200`).catch(() => [])
       ]);
 
       App.currentCampaign = { ...App.currentCampaign, ...campaign };
@@ -64,6 +148,8 @@ const DMPanel = {
       const dms = members.filter((m) => m.role === 'dm');
       const slotsUsed = members.length;
       const slotsMax = campaign.max_players || 6;
+      const slotsFree = Math.max(0, slotsMax - slotsUsed);
+      const campAge = this._campDaysSince(campaign.created_at);
 
       const assignedUserIds = new Set(characters.map((ch) => ch.user_id).filter(Boolean));
       const playersWithoutChar = players.filter((p) => !assignedUserIds.has(p.id));
@@ -76,30 +162,105 @@ const DMPanel = {
       const mapSettings = mapData?.settings || {};
       const fogOn = mapSettings.fog_enabled === 1 || mapSettings.fog_enabled === true;
       const hasMapBg = !!(mapSettings.background_image || mapSettings.backgroundImage);
+      const gridW = mapSettings.grid_width ?? 25;
+      const gridH = mapSettings.grid_height ?? 18;
+      const gridCellW = mapSettings.grid_cell_width > 0 ? mapSettings.grid_cell_width : (mapSettings.grid_size ?? 40);
+      const gridCellH = mapSettings.grid_cell_height > 0 ? mapSettings.grid_cell_height : (mapSettings.grid_size ?? 40);
 
       const visibleNpcs = npcs.filter((n) => n.is_visible).length;
+      const hiddenNpcs = npcs.length - visibleNpcs;
+      let monsterCount = 0;
+      let legendaryNpc = 0;
+      npcs.forEach((n) => {
+        try {
+          const meta = JSON.parse(n.stats || '{}');
+          if (meta.category === 'monster') monsterCount += 1;
+          if (typeof NpcTemplates !== 'undefined' && meta.templateId) {
+            const tpl = NpcTemplates.getById(meta.templateId);
+            if (tpl?.legendary) legendaryNpc += 1;
+          }
+        } catch (_e) { /* ignore */ }
+      });
+
       const dmNotes = notes.filter((n) => n.is_dm_only).length;
       const publicNotes = notes.length - dmNotes;
+      const sessionNotes = notes.filter((n) => n.session_number).length;
 
-      const recentRolls = (diceLog || []).slice(-5).reverse();
+      const recentRolls = (diceLog || []).slice(-8).reverse();
+      const diceTotal = (diceLog || []).length;
+      const nat20 = (diceLog || []).filter((r) => r.total === 20 && /d20/i.test(r.roll_expression || '')).length;
+      const nat1 = (diceLog || []).filter((r) => r.total === 1 && /d20/i.test(r.roll_expression || '')).length;
+
       const avgLevel = characters.length
         ? (characters.reduce((s, ch) => s + (ch.level || 1), 0) / characters.length).toFixed(1)
         : '—';
+      const minLevel = characters.length ? Math.min(...characters.map((c) => c.level || 1)) : '—';
+      const maxLevel = characters.length ? Math.max(...characters.map((c) => c.level || 1)) : '—';
+      const totalHpMax = characters.reduce((s, c) => s + (c.max_hp || 0), 0);
+      const totalHpCur = characters.reduce((s, c) => s + (c.current_hp || 0), 0);
+      const partyHpPct = totalHpMax > 0 ? Math.round((totalHpCur / totalHpMax) * 100) : null;
+      const wounded = characters.filter((c) => c.max_hp > 0 && c.current_hp < c.max_hp && c.current_hp > 0).length;
+      const downed = characters.filter((c) => (c.current_hp || 0) <= 0).length;
+      const totalInsp = characters.reduce((s, c) => s + (parseInt(c.inspiration, 10) || 0), 0);
+      const partyWealthCp = characters.reduce((s, c) => s + this._walletCopper(c), 0);
+
+      const questsActive = quests.filter((q) => q.status === 'active').length;
+      const questsDone = quests.filter((q) => q.status === 'completed').length;
+      const questsFailed = quests.filter((q) => q.status === 'failed' || q.status === 'abandoned').length;
+      const questsMain = quests.filter((q) => q.quest_type === 'main').length;
+
+      const musicTracks = musicData?.tracks || [];
+      const musicPlaying = !!musicData?.playback?.isPlaying;
+      const msgCount = messages.length;
+      const msgHint = msgCount >= 200 ? '200+' : String(msgCount);
+
+      const world = this._worldSnapshot(worldState);
 
       const statusLabel = campaign.status === 'active' ? 'Aktywna' : escapeHtml(campaign.status || '—');
       const statusClass = campaign.status === 'active' ? 'dm-badge-active' : 'dm-badge-muted';
+
+      const partyRows = characters.length
+        ? characters.map((c) => {
+          const hpPct = c.max_hp > 0 ? Math.round((c.current_hp / c.max_hp) * 100) : 100;
+          const hpClass = hpPct <= 25 ? 'dm-hp--critical' : hpPct <= 50 ? 'dm-hp--low' : '';
+          const insp = parseInt(c.inspiration, 10) || 0;
+          const player = members.find((m) => m.id === c.user_id);
+          return `<tr>
+            <td><strong>${escapeHtml(c.name)}</strong><span class="dm-party-sub">${escapeHtml(c.race || '')} ${escapeHtml(c.char_class || '')} ${c.level}</span></td>
+            <td>${escapeHtml(player?.display_name || player?.username || '—')}</td>
+            <td class="dm-party-hp">
+              <div class="dm-hp-bar ${hpClass}" style="--hp:${hpPct}%"><span>${c.current_hp}/${c.max_hp}</span></div>
+            </td>
+            <td>${c.armor_class ?? '—'}</td>
+            <td>${insp > 0 ? '⭐'.repeat(Math.min(insp, 3)) + (insp > 3 ? `+${insp - 3}` : '') : '—'}</td>
+            <td class="dm-party-wallet">${typeof Economy !== 'undefined' ? escapeHtml(Economy.formatWallet(c)) : '—'}</td>
+          </tr>`;
+        }).join('')
+        : '<tr><td colspan="6" class="sheet-hint">Brak postaci w kampanii</td></tr>';
 
       container.innerHTML = `
         <div class="dm-campaign-overview">
           <div class="dm-camp-header">
             <div>
               <h4 class="dm-camp-title">${escapeHtml(campaign.name)}</h4>
-              <p class="dm-camp-meta">${escapeHtml(campaign.setting || 'Forgotten Realms')} · utworzono ${formatDate(campaign.created_at)}</p>
+              <p class="dm-camp-meta">
+                ${escapeHtml(campaign.setting || 'Forgotten Realms')}
+                · utworzono ${formatDate(campaign.created_at)}
+                ${campAge != null ? ` · <strong>${campAge}</strong> dni kampanii` : ''}
+              </p>
             </div>
             <div class="dm-camp-header-actions">
               <span class="dm-badge ${statusClass}">${statusLabel}</span>
-              <button type="button" class="btn btn-sm btn-secondary" data-refresh-campaign-info title="Odśwież">↻</button>
+              <button type="button" class="btn btn-sm btn-secondary" data-refresh-campaign-info title="Odśwież statystyki">↻ Odśwież</button>
             </div>
+          </div>
+
+          <div class="dm-camp-kpi-row">
+            <span class="dm-kpi">🎮 <strong>${players.length}</strong> graczy</span>
+            <span class="dm-kpi">🪑 <strong>${slotsFree}</strong> wolnych miejsc</span>
+            <span class="dm-kpi">🎲 <strong>${diceTotal}</strong> rzutów w logu</span>
+            <span class="dm-kpi">💬 <strong>${msgHint}</strong> wiad. (ostatnie)</span>
+            ${partyHpPct != null ? `<span class="dm-kpi dm-kpi--hp">❤️ drużyna <strong>${partyHpPct}%</strong> HP</span>` : ''}
           </div>
 
           ${campaign.description ? `<p class="dm-camp-desc">${escapeHtml(campaign.description)}</p>` : '<p class="dm-camp-desc dm-camp-desc-empty">Brak opisu kampanii — możesz go dodać przy edycji na pulpicie.</p>'}
@@ -110,18 +271,84 @@ const DMPanel = {
               <code class="dm-invite-code">${escapeHtml(campaign.invite_code)}</code>
               <button type="button" class="btn btn-sm btn-primary" data-copy-invite>📋 Kopiuj</button>
             </div>
-            <span class="sheet-hint">Udostępnij graczom: Dołącz do kampanii → wklej kod</span>
+            <span class="sheet-hint">Udostępnij graczom: Dołącz do kampanii → wklej kod · limit <strong>${slotsMax}</strong> miejsc (łącznie z MG)</span>
           </div>
 
-          <div class="dm-camp-stats-grid">
-            <div class="dm-camp-stat"><span class="dm-stat-val">${slotsUsed}/${slotsMax}</span><span class="dm-stat-lbl">Miejsca</span></div>
-            <div class="dm-camp-stat"><span class="dm-stat-val">${players.length}</span><span class="dm-stat-lbl">Graczy</span></div>
-            <div class="dm-camp-stat"><span class="dm-stat-val">${characters.length}</span><span class="dm-stat-lbl">Postaci</span></div>
-            <div class="dm-camp-stat"><span class="dm-stat-val">poz. ${avgLevel}</span><span class="dm-stat-lbl">Średni lvl</span></div>
-            <div class="dm-camp-stat"><span class="dm-stat-val">${npcs.length}</span><span class="dm-stat-lbl">NPC (${visibleNpcs} wid.)</span></div>
-            <div class="dm-camp-stat"><span class="dm-stat-val">${notes.length}</span><span class="dm-stat-lbl">Notatek</span></div>
-            <div class="dm-camp-stat"><span class="dm-stat-val">${tokens.length}</span><span class="dm-stat-lbl">Tokenów</span></div>
-            <div class="dm-camp-stat"><span class="dm-stat-val">${initEntries.length || '—'}</span><span class="dm-stat-lbl">Init (r.${initRound})</span></div>
+          <div class="dm-camp-stat-groups">
+            ${this._statGroup('👥 Drużyna i gracze', [
+              this._statTile(`${slotsUsed}/${slotsMax}`, 'Miejsca'),
+              this._statTile(String(players.length), 'Graczy'),
+              this._statTile(String(characters.length), 'Postaci'),
+              this._statTile(`poz. ${avgLevel}`, 'Śr. poziom'),
+              this._statTile(`${minLevel}–${maxLevel}`, 'Zakres lvl'),
+              this._statTile(partyHpPct != null ? `${partyHpPct}%` : '—', 'HP drużyny', partyHpPct != null && partyHpPct <= 40 ? 'dm-camp-stat--warn' : ''),
+              this._statTile(String(wounded), 'Ranni', wounded > 0 ? 'dm-camp-stat--warn' : ''),
+              this._statTile(String(downed), 'Bez przytomności', downed > 0 ? 'dm-camp-stat--danger' : ''),
+              this._statTile(String(totalInsp), 'Inspiracja łącznie'),
+              this._statTile(this._formatPartyWealth(partyWealthCp), 'Majątek drużyny')
+            ].join(''))}
+            ${this._statGroup('📚 Zasoby kampanii', [
+              this._statTile(`${questsActive}/${quests.length}`, 'Questy aktywne'),
+              this._statTile(String(questsDone), 'Ukończone'),
+              this._statTile(String(questsMain), 'Główne wątki'),
+              this._statTile(String(npcs.length), `NPC (${visibleNpcs} wid.)`),
+              this._statTile(String(monsterCount), 'Potwory'),
+              this._statTile(String(hiddenNpcs), 'Ukryte NPC'),
+              this._statTile(String(bestiary.length), 'Bestiariusz'),
+              this._statTile(String(handouts.length), 'Handouty'),
+              this._statTile(String(notes.length), 'Notatki'),
+              this._statTile(String(sessionNotes), 'Z sesją #')
+            ].join(''))}
+            ${this._statGroup('🎵 Sesja i narzędzia', [
+              this._statTile(String(musicTracks.length), 'Utwory muzyki'),
+              this._statTile(musicPlaying ? '▶ gra' : '⏸', 'Muzyka'),
+              this._statTile(String(sounds.length), 'Dźwięki SB'),
+              this._statTile(String(merchants.length), 'Kupcy'),
+              this._statTile(String(lootTables.length), 'Tabele łupu'),
+              this._statTile(String(tokenImages.length), 'Obrazy tokenów'),
+              this._statTile(String(diceTotal), 'Rzuty w logu'),
+              this._statTile(`20:${nat20} · 1:${nat1}`, 'Krytyki d20')
+            ].join(''))}
+            ${this._statGroup('🗺️ Mapa i walka', [
+              this._statTile(String(tokens.length), 'Tokenów'),
+              this._statTile(fogOn ? 'mgła ON' : 'mgła OFF', 'Mgła wojny'),
+              this._statTile(hasMapBg ? '✓' : '—', 'Tło mapy'),
+              this._statTile(`${gridW}×${gridH}`, 'Siatka'),
+              this._statTile(String(initEntries.length || 0), `Init r.${initRound}`),
+              this._statTile(legendaryNpc > 0 ? String(legendaryNpc) : '0', 'Legendarni NPC')
+            ].join(''))}
+          </div>
+
+          ${world ? `
+          <section class="dm-camp-world-card">
+            <h5>📅 Świat gry (kalendarz)</h5>
+            <div class="dm-world-grid">
+              <div><span class="dm-camp-label">Data</span><strong>${escapeHtml(world.date)}</strong></div>
+              <div><span class="dm-camp-label">Czas</span><strong>${escapeHtml(world.clock)}</strong> · ${world.tod.icon} ${escapeHtml(world.tod.label)}</div>
+              <div><span class="dm-camp-label">Pogoda</span><strong>${world.weather.icon} ${escapeHtml(world.weather.label)}</strong></div>
+              <div><span class="dm-camp-label">Wiatr / temp.</span>${escapeHtml(world.wind.label)} · ${escapeHtml(world.temp.pl)}</div>
+              <div><span class="dm-camp-label">Pora roku</span>${world.season.icon} ${escapeHtml(world.season.label)}</div>
+              ${world.envWarn ? `<div class="dm-camp-alert dm-camp-alert--inline">⚠️ ${escapeHtml(world.envReasons.slice(0, 2).join(' · ') || 'Trudne warunki walki')}</div>` : ''}
+            </div>
+          </section>` : ''}
+
+          <div class="dm-camp-subsection">
+            <h5>⚔️ Stan drużyny</h5>
+            <div class="dm-party-table-wrap">
+              <table class="dm-party-table">
+                <thead>
+                  <tr>
+                    <th>Postać</th>
+                    <th>Gracz</th>
+                    <th>HP</th>
+                    <th>AC</th>
+                    <th>Insp.</th>
+                    <th>Portfel</th>
+                  </tr>
+                </thead>
+                <tbody>${partyRows}</tbody>
+              </table>
+            </div>
           </div>
 
           <div class="dm-camp-subsection">
@@ -131,7 +358,7 @@ const DMPanel = {
                 const char = characters.find((ch) => ch.user_id === m.id);
                 const roleIcon = m.role === 'dm' ? '👑' : '🎮';
                 const charLine = char
-                  ? `${escapeHtml(char.name)} · ${escapeHtml(char.char_class)} ${char.level}`
+                  ? `${escapeHtml(char.name)} · ${escapeHtml(char.char_class)} ${char.level} · ❤️ ${char.current_hp}/${char.max_hp}`
                   : (m.role === 'player' ? '<em class="dm-warn">brak przypisanej postaci</em>' : '—');
                 return `<li>
                   <span class="dm-member-name">${roleIcon} ${escapeHtml(m.display_name || m.username)}</span>
@@ -148,32 +375,63 @@ const DMPanel = {
               <h5>⚔️ Walka / inicjatywa</h5>
               ${initEntries.length
                 ? `<p>Tura: <strong>${escapeHtml(activeInit?.entity_name || '—')}</strong> · Runda <strong>${initRound}</strong></p>
-                   <p class="sheet-hint">Kolejka: ${initEntries.slice(0, 6).map((e) => `${e.is_active ? '▶' : ''}${escapeHtml(e.entity_name)} (${e.initiative_roll})`).join(' → ')}${initEntries.length > 6 ? '…' : ''}</p>`
+                   <ol class="dm-init-queue">${initEntries.map((e) =>
+                     `<li class="${e.is_active ? 'is-active' : ''}">${e.is_active ? '▶ ' : ''}${escapeHtml(e.entity_name)} <span class="dm-init-val">${e.initiative_roll}</span></li>`
+                   ).join('')}</ol>`
                 : '<p class="sheet-hint">Brak aktywnej kolejki — dodaj inicjatywę w zakładce Inicjatywa.</p>'}
             </div>
             <div>
               <h5>🗺️ Mapa</h5>
-              <p>${hasMapBg ? 'Tło: ustawione' : 'Tło: brak'} · Mgła: ${fogOn ? 'włączona' : 'wyłączona'}</p>
-              <p class="sheet-hint">${tokens.length} token(ów) na planszy</p>
+              <ul class="dm-camp-bullets">
+                <li>Tło planszy: <strong>${hasMapBg ? 'ustawione' : 'brak'}</strong></li>
+                <li>Mgła wojny: <strong>${fogOn ? 'włączona' : 'wyłączona'}</strong></li>
+                <li>Plansza: <strong>${gridW}×${gridH}</strong> · kratka ${gridCellW}×${gridCellH}px</li>
+                <li>Tokeny na mapie: <strong>${tokens.length}</strong></li>
+                <li>Biblioteka grafik tokenów: <strong>${tokenImages.length}</strong></li>
+              </ul>
+            </div>
+            <div>
+              <h5>📜 Questy</h5>
+              <ul class="dm-camp-bullets">
+                <li>Aktywne: <strong>${questsActive}</strong></li>
+                <li>Ukończone: <strong>${questsDone}</strong></li>
+                <li>Nieudane / porzucone: <strong>${questsFailed}</strong></li>
+              </ul>
             </div>
           </div>
 
-          <div class="dm-camp-subsection">
-            <h5>📝 Notatki</h5>
-            <p>Publiczne: <strong>${publicNotes}</strong> · Tylko MG: <strong>${dmNotes}</strong></p>
+          <div class="dm-camp-subsection dm-camp-cols">
+            <div>
+              <h5>📝 Notatki</h5>
+              <p>Publiczne: <strong>${publicNotes}</strong> · Tylko MG: <strong>${dmNotes}</strong> · Z numerem sesji: <strong>${sessionNotes}</strong></p>
+            </div>
+            <div>
+              <h5>🧙 NPC i bestiariusz</h5>
+              <ul class="dm-camp-bullets">
+                <li>NPC łącznie: <strong>${npcs.length}</strong> (widoczne: ${visibleNpcs}, ukryte: ${hiddenNpcs})</li>
+                <li>Potwory w NPC: <strong>${monsterCount}</strong></li>
+                <li>Wpisy bestiariusza: <strong>${bestiary.length}</strong></li>
+                ${legendaryNpc ? `<li>Legendarni (szablon): <strong>${legendaryNpc}</strong></li>` : ''}
+              </ul>
+            </div>
           </div>
 
           ${recentRolls.length ? `
           <div class="dm-camp-subsection">
-            <h5>🎲 Ostatnie rzuty</h5>
+            <h5>🎲 Ostatnie rzuty (${recentRolls.length})</h5>
             <ul class="dm-recent-rolls">
-              ${recentRolls.map((r) => `<li><strong>${escapeHtml(r.username)}</strong> ${escapeHtml(r.roll_expression)} = <span class="dm-roll-total">${r.total}</span></li>`).join('')}
+              ${recentRolls.map((r) => {
+                const when = r.created_at ? formatTime(r.created_at) : '';
+                return `<li><span class="dm-roll-time">${when}</span> <strong>${escapeHtml(r.username)}</strong> ${escapeHtml(r.roll_expression)} = <span class="dm-roll-total">${r.total}</span></li>`;
+              }).join('')}
             </ul>
+            <p class="sheet-hint">W logu zapisano łącznie ${diceTotal} rzutów · naturalne 20: ${nat20} · naturalne 1: ${nat1}</p>
           </div>` : ''}
 
           <div class="dm-camp-footer sheet-hint">
             ID kampanii: <code>${escapeHtml(campaign.id)}</code>
             ${dms.length ? ` · MG: ${dms.map((d) => escapeHtml(d.display_name || d.username)).join(', ')}` : ''}
+            · questy: ${quests.length} · handouty: ${handouts.length} · dźwięki: ${sounds.length}
           </div>
         </div>
       `;
@@ -183,12 +441,14 @@ const DMPanel = {
   },
 
   async loadNpcs() {
+    const container = document.getElementById('npc-list');
+    if (!container || !App.currentCampaign) return;
     try {
       const npcs = await apiFetch(`/campaigns/${App.currentCampaign.id}/npcs`);
       this._npcCache = npcs;
-      const container = document.getElementById('npc-list');
       if (npcs.length === 0) {
-        container.innerHTML = '<p style="color:var(--text-muted);">Brak NPC. Utwórz pierwszego!</p>';
+        container.innerHTML = '<p class="npc-gen-empty-msg">Brak NPC. Utwórz pierwszego!</p>';
+        if (typeof NpcGenerator !== 'undefined') NpcGenerator._updateHeaderMeta();
         return;
       }
       container.innerHTML = npcs.map(npc => {
@@ -219,30 +479,76 @@ const DMPanel = {
           </div>
         </div>`;
       }).join('');
+      if (typeof NpcGenerator !== 'undefined') NpcGenerator._updateHeaderMeta();
     } catch (err) {
       console.error('Failed to load NPCs:', err);
     }
   },
 
   async loadPartyOverview() {
+    if (!App.currentCampaign || App.currentCampaign.role !== 'dm') return;
+    const container = document.getElementById('dm-party-overview');
+    if (!container) return;
     try {
       const chars = await apiFetch(`/campaigns/${App.currentCampaign.id}/characters`);
-      const container = document.getElementById('dm-party-overview');
+      this._cachedParty = chars;
       if (chars.length === 0) {
         container.innerHTML = '<p style="color:var(--text-muted);">Brak postaci</p>';
         return;
       }
       container.innerHTML = chars.map(c => {
         const hpPercent = c.max_hp > 0 ? Math.round((c.current_hp / c.max_hp) * 100) : 100;
+        const insp = parseInt(c.inspiration, 10) || 0;
+        const stars = insp > 0 ? '⭐'.repeat(Math.min(insp, 5)) + (insp > 5 ? `(${insp})` : '') : '○';
         return `
-          <div class="party-member-row">
+          <div class="party-member-row" data-char-id="${escapeHtml(c.id)}">
             <span><strong>${escapeHtml(c.name)}</strong> (${escapeHtml(c.player_name || '?')}) - ${escapeHtml(c.race)} ${escapeHtml(c.char_class)} Poz.${c.level}</span>
             <span>❤️ ${c.current_hp}/${c.max_hp} (${hpPercent}%) | 🛡️ AC ${c.armor_class} | Percepcja ${10 + calcModifier(c.wisdom)}</span>
+            <span class="party-inspiration">
+              <span class="party-inspiration-label" title="Inspiracja">${stars}</span>
+              <button type="button" class="btn btn-xs btn-secondary" data-dm-insp="add" data-char-id="${escapeHtml(c.id)}" title="+1 inspiracja">+</button>
+              <button type="button" class="btn btn-xs btn-secondary" data-dm-insp="sub" data-char-id="${escapeHtml(c.id)}" title="-1 inspiracja" ${insp <= 0 ? 'disabled' : ''}>−</button>
+              <button type="button" class="btn btn-xs btn-secondary" data-dm-insp="set" data-char-id="${escapeHtml(c.id)}" title="Ustaw...">⚙</button>
+            </span>
           </div>
         `;
       }).join('');
+      this._bindInspirationButtons();
     } catch (err) {
       console.error('Failed to load party overview:', err);
+    }
+  },
+
+  _bindInspirationButtons() {
+    const container = document.getElementById('dm-party-overview');
+    if (!container) return;
+    container.querySelectorAll('[data-dm-insp]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.dmInsp;
+        const id = btn.dataset.charId;
+        if (typeof Inspiration === 'undefined') return;
+        if (action === 'add') Inspiration.grantOne(id);
+        else if (action === 'sub') Inspiration.removeOne(id);
+        else if (action === 'set') {
+          const current = (this._cachedParty || []).find((c) => c.id === id);
+          const v = prompt(`Ustaw Inspirację dla ${current?.name || 'postaci'}:`, String(current?.inspiration || 0));
+          if (v === null) return;
+          Inspiration.setExact(id, parseInt(v, 10) || 0);
+        }
+      });
+    });
+    if (!this._inspGrantAllBound) {
+      this._inspGrantAllBound = true;
+      document.getElementById('dm-insp-grant-all')?.addEventListener('click', () => {
+        if (typeof Inspiration === 'undefined') return;
+        Inspiration.grantAll(1);
+      });
+    }
+  },
+
+  refreshInspirationOverview() {
+    if (App.currentCampaign && App.currentCampaign.role === 'dm') {
+      this.loadPartyOverview();
     }
   },
 
@@ -391,6 +697,14 @@ const DMPanel = {
       </form>
     `;
     showGenericModal('Własny NPC / potwór', html);
+    setTimeout(() => {
+      if (typeof AISuggest !== 'undefined') {
+        AISuggest.attachToGenericModal('custom_npc', () => ({
+          name: document.getElementById('npc-name')?.value,
+          race: document.getElementById('npc-race')?.value
+        }), (r) => AISuggest.applyCustomNpc(r));
+      }
+    }, 0);
     document.getElementById('create-npc-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       try {
@@ -551,118 +865,4 @@ const DMPanel = {
     showToast(`${npc.name} → mapa + inicjatywa (${roll})`, 'success');
   },
 
-  async showConditions() {
-    try {
-      const conditions = await apiFetch('/conditions');
-      const body = conditions.map(c => `
-        <div style="margin-bottom:12px;padding:10px;background:var(--bg-surface);border-radius:var(--radius);border-left:3px solid var(--accent-gold);">
-          <strong style="color:var(--accent-gold);">${escapeHtml(c.name)}</strong>
-          <p style="color:var(--text-secondary);font-size:0.9rem;margin-top:4px;">${escapeHtml(c.description)}</p>
-        </div>
-      `).join('');
-      document.getElementById('conditions-modal-body').innerHTML = body;
-      openModal('conditions-modal');
-    } catch (err) {
-      showToast('Błąd ładowania stanów', 'error');
-    }
-  },
-
-  showRulesReference() {
-    const html = `
-      <div style="display:flex;flex-direction:column;gap:12px;">
-        <div style="padding:10px;background:var(--bg-surface);border-radius:var(--radius);">
-          <strong style="color:var(--accent-gold);">Akcje w walce</strong>
-          <ul style="color:var(--text-secondary);font-size:0.9rem;margin-top:6px;padding-left:20px;">
-            <li><strong>Atak</strong> - Rzut ataku vs AC celu</li>
-            <li><strong>Rzucenie Czaru</strong> - Użyj czaru (akcja/bonus/reakcja)</li>
-            <li><strong>Unik (Dodge)</strong> - Ataki na ciebie mają utrudnienie</li>
-            <li><strong>Odwrót (Disengage)</strong> - Ruch nie prowokuje ataków okazyjnych</li>
-            <li><strong>Pomoc (Help)</strong> - Daj przewagę sojusznikowi</li>
-            <li><strong>Ukrycie się (Hide)</strong> - Test Skradania</li>
-            <li><strong>Szukanie (Search)</strong> - Test Percepcja/Śledztwo</li>
-            <li><strong>Przygotowanie (Ready)</strong> - Przygotuj reakcję</li>
-            <li><strong>Sprint (Dash)</strong> - Podwój prędkość ruchu</li>
-          </ul>
-        </div>
-        <div style="padding:10px;background:var(--bg-surface);border-radius:var(--radius);">
-          <strong style="color:var(--accent-gold);">Osłony (Cover)</strong>
-          <ul style="color:var(--text-secondary);font-size:0.9rem;margin-top:6px;padding-left:20px;">
-            <li><strong>Połowiczna (Half)</strong> - +2 AC i rzuty obronne DEX</li>
-            <li><strong>Trzy-czwarte (3/4)</strong> - +5 AC i rzuty obronne DEX</li>
-            <li><strong>Pełna (Full)</strong> - Nie można bezpośrednio atakować</li>
-          </ul>
-        </div>
-        <div style="padding:10px;background:var(--bg-surface);border-radius:var(--radius);">
-          <strong style="color:var(--accent-gold);">Trudność Testów (DC)</strong>
-          <table style="color:var(--text-secondary);font-size:0.9rem;margin-top:6px;width:100%;">
-            <tr><td>Bardzo łatwe</td><td style="text-align:right;font-weight:700;">DC 5</td></tr>
-            <tr><td>Łatwe</td><td style="text-align:right;font-weight:700;">DC 10</td></tr>
-            <tr><td>Średnie</td><td style="text-align:right;font-weight:700;">DC 15</td></tr>
-            <tr><td>Trudne</td><td style="text-align:right;font-weight:700;">DC 20</td></tr>
-            <tr><td>Bardzo trudne</td><td style="text-align:right;font-weight:700;">DC 25</td></tr>
-            <tr><td>Prawie niemożliwe</td><td style="text-align:right;font-weight:700;">DC 30</td></tr>
-          </table>
-        </div>
-        <div style="padding:10px;background:var(--bg-surface);border-radius:var(--radius);">
-          <strong style="color:var(--accent-gold);">Quick Reference</strong>
-          <ul style="color:var(--text-secondary);font-size:0.9rem;margin-top:6px;padding-left:20px;">
-            <li><strong>Trafienie krytyczne:</strong> Nat 20 - podwójne kości obrażeń</li>
-            <li><strong>Ciężka porażka:</strong> Nat 1 - automatyczne pudło</li>
-            <li><strong>Stabilizacja:</strong> DC 10 rzut obr. na śmierć</li>
-            <li><strong>Krótki odpoczynek:</strong> ≥1h, kości życia na leczenie</li>
-            <li><strong>Długi odpoczynek:</strong> ≥8h, pełne HP, połowa kości życia</li>
-            <li><strong>Reakcja:</strong> 1x na rundę (atak okazyjny, Counterspell, etc.)</li>
-          </ul>
-        </div>
-      </div>
-    `;
-    showGenericModal('📖 Szybka Referencja Zasad', html);
-  },
-
-  showRandomTables() {
-    const tables = {
-      'Pogoda': ['☀️ Słonecznie', '⛅ Pochmurno', '🌧️ Deszcz', '⛈️ Burza', '🌫️ Mgła', '❄️ Śnieg', '🌪️ Wichura', '🌤️ Przyjemnie'],
-      'Napotkane NPC': ['Wędrowny kupiec', 'Zagubiony podróżnik', 'Patrol straży', 'Banda rozbójników', 'Pielgrzym', 'Wędrowny bard', 'Łowca nagród', 'Tajemniczy czarodziej'],
-      'Komplikacja w lochu': ['Pułapka!', 'Zawalony tunel', 'Tajne przejście', 'Zagadka na drzwiach', 'Trujący gaz', 'Zalany korytarz', 'Rywalizujący poszukiwacze', 'Przeklęty skarb'],
-      'Nastrój w tawernie': ['Głośna i radosna', 'Cicha i podejrzana', 'Pijacka bójka', 'Dziwny bard gra', 'Plotki o smoku', 'Turniej pokera', 'Tajemniczy nieznajomy w kącie', 'Zamknięta — zaraza']
-    };
-
-    this._randomTables = {};
-    let html = '<div id="random-tables-root" class="random-tables-root">';
-    for (const [tableName, options] of Object.entries(tables)) {
-      const tableId = tableName.replace(/\s+/g, '-');
-      this._randomTables[tableId] = options;
-      html += `
-        <div class="random-table-block">
-          <div class="random-table-header">
-            <strong class="random-table-title">${escapeHtml(tableName)}</strong>
-            <button type="button" class="btn btn-sm btn-primary" data-roll-table="${escapeHtml(tableId)}">🎲 Losuj</button>
-          </div>
-          <div class="random-table-result" data-result-for="${escapeHtml(tableId)}"></div>
-        </div>
-      `;
-    }
-    html += '</div>';
-    showGenericModal('🎲 Losowe Tabele', html);
-
-    const root = document.getElementById('random-tables-root');
-    if (!root) return;
-    root.addEventListener('click', (e) => {
-      const btn = e.target.closest('[data-roll-table]');
-      if (!btn) return;
-      const tableId = btn.dataset.rollTable;
-      const options = this._randomTables[tableId];
-      if (options) this.rollTable(tableId, options);
-    });
-  },
-
-  rollTable(tableId, options) {
-    if (!options?.length) return;
-    const idx = Math.floor(Math.random() * options.length);
-    const result = options[idx];
-    const el = document.querySelector(`[data-result-for="${tableId}"]`);
-    if (el) {
-      el.innerHTML = `<strong class="random-table-hit">→ ${escapeHtml(result)}</strong>`;
-    }
-  }
 };

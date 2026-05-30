@@ -64,9 +64,14 @@ const MapZones = {
     this.renderList();
   },
 
-  draw(ctx, gs) {
+  draw(ctx) {
     const gw = BattleMap.settings?.grid_width || 25;
     const gh = BattleMap.settings?.grid_height || 18;
+    const metrics = typeof BattleMap.gridMetrics === 'function'
+      ? BattleMap.gridMetrics()
+      : { gsW: 40, gsH: 40, ox: 0, oy: 0 };
+    const { gsW, gsH, ox, oy } = metrics;
+    const cellPx = (x, y) => ({ x: ox + x * gsW, y: oy + y * gsH });
 
     this.zones.forEach((zone) => {
       const cells = zone.cells?.length
@@ -86,21 +91,23 @@ const MapZones = {
       ctx.save();
       cells.forEach((key) => {
         const { x, y } = MapTactics.parseCellKey(key);
+        const p = cellPx(x, y);
         ctx.fillStyle = fill;
-        ctx.fillRect(x * gs, y * gs, gs, gs);
+        ctx.fillRect(p.x, p.y, gsW, gsH);
         ctx.strokeStyle = stroke;
-        ctx.strokeRect(x * gs + 0.5, y * gs + 0.5, gs - 1, gs - 1);
+        ctx.strokeRect(p.x + 0.5, p.y + 0.5, gsW - 1, gsH - 1);
       });
       if (zone.label && cells.length) {
         const { x, y } = MapTactics.parseCellKey(cells[0]);
+        const p = cellPx(x, y);
         ctx.fillStyle = 'rgba(42, 26, 16, 0.75)';
         ctx.font = '10px EB Garamond, serif';
-        ctx.fillText(zone.label, x * gs + 2, y * gs + 12);
+        ctx.fillText(zone.label, p.x + 2, p.y + 12);
       }
       ctx.restore();
     });
 
-    if (this.placement) this._drawPlacementPreview(ctx, gs, gw, gh);
+    if (this.placement) this._drawPlacementPreview(ctx, gsW, gsH, gw, gh, cellPx);
   },
 
   _previewCells(gw, gh) {
@@ -120,8 +127,9 @@ const MapZones = {
     return MapTactics.resolveZoneCells(zone, gw, gh);
   },
 
-  _drawPlacementPreview(ctx, gs, gw, gh) {
+  _drawPlacementPreview(ctx, gsW, gsH, gw, gh, cellPx) {
     const cells = this._previewCells(gw, gh);
+    const pxAt = cellPx || ((x, y) => ({ x: x * gsW, y: y * gsH }));
     const spell = this.placement.spell;
     const colors = spell
       ? MapZoneTypes.getSpellColors(spell.damageType)
@@ -132,8 +140,9 @@ const MapZones = {
     ctx.setLineDash([4, 4]);
     cells.forEach((key) => {
       const { x, y } = MapTactics.parseCellKey(key);
-      ctx.fillRect(x * gs, y * gs, gs, gs);
-      ctx.strokeRect(x * gs + 0.5, y * gs + 0.5, gs - 1, gs - 1);
+      const p = pxAt(x, y);
+      ctx.fillRect(p.x, p.y, gsW, gsH);
+      ctx.strokeRect(p.x + 0.5, p.y + 0.5, gsW - 1, gsH - 1);
     });
     ctx.restore();
   },
